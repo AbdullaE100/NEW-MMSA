@@ -65,20 +65,21 @@ class DeepFaceEmotionDetector:
     A dedicated class for using DeepFace to analyze emotions in videos
     """
     
-    def __init__(self, output_dir='./deepface_results', num_frames=10):
+    def __init__(self, output_dir='./deepface_results', num_frames=10, detector_backend='retinaface'):
         """
         Initialize the DeepFace emotion detector
         
         Args:
             output_dir (str): Directory to save results
             num_frames (int): Number of frames to analyze per video
+            detector_backend (str): Face detector backend to use (retinaface, opencv, mtcnn, ssd, etc.)
         """
         if not DEEPFACE_AVAILABLE:
             raise ImportError("DeepFace is not available. Please install it with 'pip install deepface'")
         
         self.output_dir = output_dir
         self.num_frames = num_frames
-        self.detector_backend = 'retinaface'  # Default to retinaface which has good performance
+        self.detector_backend = detector_backend  # Default to retinaface which has good performance
         
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
@@ -412,6 +413,20 @@ class DeepFaceEmotionDetector:
         
         return results
     
+    def analyze_video(self, video_path, num_frames=None, detector_backend=None):
+        """
+        Alias for process_video to maintain compatibility with the Gradio interface
+        
+        Args:
+            video_path (str): Path to video file
+            num_frames (int): Number of frames to analyze
+            detector_backend (str): Face detector backend to use
+            
+        Returns:
+            dict: Emotion analysis results
+        """
+        return self.process_video(video_path, num_frames, detector_backend)
+    
     def visualize_results(self, results, output_path=None):
         """
         Visualize sentiment analysis results
@@ -661,8 +676,7 @@ def main():
         sys.exit(1)
     
     # Initialize the detector
-    detector = DeepFaceEmotionDetector(output_dir=args.output, num_frames=args.num_frames)
-    detector.detector_backend = args.detector
+    detector = DeepFaceEmotionDetector(output_dir=args.output, num_frames=args.num_frames, detector_backend=args.detector)
     
     # Process video(s)
     results = []

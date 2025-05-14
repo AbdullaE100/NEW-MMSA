@@ -733,6 +733,24 @@ class AudioSentimentAnalyzer:
         except Exception as e:
             logger.error(f"Error predicting from video {video_path}: {str(e)}")
             return None
+            
+        """
+        Alias for predict_from_video to maintain compatibility with the Gradio interface
+        
+        Args:
+            video_path (str): Path to video file
+            
+        Returns:
+            dict: Predicted emotion, confidence, and sentiment score
+        """
+        return self.predict_from_video(video_path)
+
+        """Alias for predict_from_video to maintain compatibility with the Gradio interface"""
+        return self.predict_from_video(video_path)
+
+def analyze_video(self, video_path):
+        """Alias for predict_from_video to maintain compatibility with the Gradio interface"""
+        return self.predict_from_video(video_path)
 
 def main():
     """

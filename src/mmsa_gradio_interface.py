@@ -557,12 +557,14 @@ class MultimodalSentimentGradio:
         """Get emoticon for sentiment category - no longer used in the redesigned interface"""
         return ""
     
-    def process_multimodal(self, video_input):
+    def process_multimodal(self, video_input=None, audio_input=None, text_input=None):
         """
-        Process video input and return combined results from all modalities
+        Process multimodal inputs and return combined results
         
         Args:
             video_input: Video file
+            audio_input: Audio file
+            text_input: Text string (only used if no transcription is available)
             
         Returns:
             tuple: HTML result, sentiment score, pie chart of modalities
@@ -583,7 +585,7 @@ class MultimodalSentimentGradio:
             'text': 'text'
         }
         
-        logger.info(f"Processing inputs: Video={video_input is not None}")
+        logger.info(f"Processing inputs: Video={video_input is not None}, Audio={audio_input is not None}, Text={text_input is not None and text_input.strip() != ''}")
         
         try:
             # Process video input (including auto-transcription if possible)
@@ -607,16 +609,15 @@ class MultimodalSentimentGradio:
                             included_modalities.append("Text (Transcribed)")
                         
                         modality = " + ".join(included_modalities)
-                        
-                        # Calculate combined weight from modalities
-                        combined_weight = 0
+                        # Calculate the weight based on included modalities
+                        weight = 0
                         for m in included_modalities:
-                            m_key = m.lower().split()[0]  # Get the first word in lowercase (e.g., "visual" from "Visual")
-                            # Map the key using modality_mapping
+                            # Extract the base modality name (first word, lowercase)
+                            m_key = m.lower().split()[0]  
+                            # Map the modality key to the correct weight key
                             weight_key = modality_mapping.get(m_key, m_key)
-                            combined_weight += weights.get(weight_key, 0.1)
-                        
-                        weight = combined_weight
+                            # Get the weight or default to 0.1
+                            weight += weights.get(weight_key, 0.1)
                     else:
                         # Just visual score
                         score = video_res.get("visual", {}).get("sentiment_score", 0)
@@ -637,6 +638,44 @@ class MultimodalSentimentGradio:
                         results["transcribed_text"] = video_res["transcribed_text"]
                 else:
                     logger.warning("Video analysis failed or returned an error")
+            
+            # Process audio input (only if not already analyzed with video)
+            if audio_input is not None and "video" not in results:
+                logger.info("Processing audio input...")
+                audio_res = self.analyze_audio(audio_input)
+                if audio_res and not "error" in audio_res:
+                    results["audio"] = audio_res
+                    
+                    score = audio_res.get("sentiment_score", 0)
+                    confidence = audio_res.get("confidence", 0.5)
+                    
+                    scores.append(score)
+                    labels.append("Audio")
+                    modalities_used.append("audio")
+                    confidence_scores.append(confidence)
+                    
+                    logger.info(f"Audio score: {score}, confidence: {confidence}")
+                else:
+                    logger.warning("Audio analysis failed or returned an error")
+            
+            # Process manual text input (only if provided and no transcription available)
+            if text_input is not None and text_input.strip() != "" and "transcribed_text" not in results:
+                logger.info("Processing manual text input...")
+                text_res = self.analyze_text(text_input)
+                if text_res and not "error" in text_res:
+                    results["text"] = text_res
+                    
+                    score = text_res.get("sentiment_score", 0)
+                    confidence = text_res.get("confidence", 0.5)
+                    
+                    scores.append(score)
+                    labels.append("Text (Manual)")
+                    modalities_used.append("text")
+                    confidence_scores.append(confidence)
+                    
+                    logger.info(f"Text score: {score}, confidence: {confidence}")
+                else:
+                    logger.warning("Text analysis failed or returned an error")
             
             # Calculate combined score from all available modalities
             if not scores:
@@ -1030,28 +1069,35 @@ def main():
     # Always enable happy heuristic
     mmsa_gradio.apply_happy_heuristic = True
     
+    # Create a wrapper function that only takes video input
+    def process_video_only(video_input):
+        return mmsa_gradio.process_multimodal(video_input, None, None)
+    
     logger.info("Launching Gradio interface...")
     with gr.Blocks(title="Multimodal Sentiment Analysis", theme=gr.themes.Soft()) as demo:
         gr.Markdown(
             """
             # Multimodal Sentiment Analysis
             
-            Analyze sentiment by combining different modalities from video (facial expressions, speech, and transcribed text).
+            Analyze sentiment by automatically combining different modalities: visual, audio, and text from video.
+            Upload a video file (MP4) to perform complete multimodal analysis.
             """
         )
         
         with gr.Row():
             with gr.Column(scale=1):
-                video_input = gr.Video(label="Upload Video (MP4 only)")
+                video_input = gr.Video(label="Upload Video (MP4)")
                 
                 # Highlight multimodal approach
                 gr.Markdown(
                     """
-                    ### Multimodal Analysis
-                    This system analyzes your video using:
-                    - Visual analysis (facial expressions)
-                    - Audio analysis (speech emotions)
-                    - Text analysis (automatically transcribed speech)
+                    ### Automatic Multimodal Analysis
+                    The system will automatically:
+                    1. Analyze facial expressions for visual sentiment
+                    2. Extract and analyze audio for speech emotion
+                    3. Transcribe speech and analyze the text sentiment
+                    
+                    All three modalities will be combined into a unified sentiment score.
                     """
                 )
                 
@@ -1070,7 +1116,7 @@ def main():
                     This multimodal sentiment analysis system combines:
                     - Visual analysis using facial expression recognition
                     - Audio analysis using speech emotion recognition
-                    - Text analysis using NLP sentiment classification
+                    - Text analysis using transcribed speech
                     
                     The system employs a weighted integration approach for multimodal fusion,
                     with contextual adaptation based on detected sentiment patterns.
@@ -1078,8 +1124,8 @@ def main():
                 )
         
         analyze_button.click(
-            fn=mmsa_gradio.process_multimodal,
-            inputs=[video_input],  # Only pass the video input
+            fn=process_video_only,
+            inputs=[video_input],
             outputs=[result_html, sentiment_score, chart_output]
         )
         
@@ -1091,11 +1137,12 @@ def main():
             
             - **Visual Analysis**: DeepFace for facial expression recognition
             - **Audio Analysis**: CNN model trained on the RAVDESS emotional speech dataset
-            - **Text Analysis**: Transformer-based sentiment classification of transcribed speech
+            - **Text Analysis**: RoBERTa-based model with context enrichment for speech transcription
+            - **Speech Recognition**: OpenAI Whisper model with Google Speech Recognition fallback
             
             The final sentiment score integrates all available modalities into a unified score 
             from -1 (strongly negative) to +1 (strongly positive), with dynamic weighting
-            between modalities.
+            between modalities (Visual: 45%, Audio: 45%, Text: 10%).
             """
         )
     
