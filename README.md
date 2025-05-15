@@ -24,13 +24,13 @@ A comprehensive tool for analyzing sentiment across multiple modalities (visual,
 
 ## User Interface
 
-![Upload Media UI](images/upload%20media%20ui.png)
+![Upload Media UI](Images/upload_media_ui.png)
 *The main interface where users can upload videos for analysis*
 
-![Sentiment Breakdown](images/Sentiment%20breakdown.png)
+![Sentiment Breakdown](Images/Sentiment_breakdown.png)
 *Detailed breakdown of sentiment analysis across all modalities*
 
-![SHAP Analysis](images/Shap%20Analysis.png)
+![SHAP Analysis](Images/Shap_Analysis.png)
 *SHAP visualizations showing how each feature contributes to the sentiment prediction*
 
 ## How to Run
