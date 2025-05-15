@@ -22,6 +22,17 @@ A comprehensive tool for analyzing sentiment across multiple modalities (visual,
 - **SHAP Visualizations**: Explains AI decisions by showing how each feature contributes to the final sentiment score
 - **Enhanced UI**: Intuitive interface with tabs for analysis results and SHAP explanations
 
+## User Interface
+
+![Upload Media UI](images/upload%20media%20ui.png)
+*The main interface where users can upload videos for analysis*
+
+![Sentiment Breakdown](images/Sentiment%20breakdown.png)
+*Detailed breakdown of sentiment analysis across all modalities*
+
+![SHAP Analysis](images/Shap%20Analysis.png)
+*SHAP visualizations showing how each feature contributes to the sentiment prediction*
+
 ## How to Run
 
 ### Standard Interface with SHAP Visualizations
