@@ -24,13 +24,13 @@ A comprehensive tool for analyzing sentiment across multiple modalities (visual,
 
 ## User Interface
 
-![Upload Media UI](Images/upload_media_ui.png)
+![Upload Media UI](https://github.com/AbdullaE100/NEW-MMSA/raw/main/Images/upload_media_ui.png)
 *The main interface where users can upload videos for analysis*
 
-![Sentiment Breakdown](Images/Sentiment_breakdown.png)
+![Sentiment Breakdown](https://github.com/AbdullaE100/NEW-MMSA/raw/main/Images/Sentiment_breakdown.png)
 *Detailed breakdown of sentiment analysis across all modalities*
 
-![SHAP Analysis](Images/Shap_Analysis.png)
+![SHAP Analysis](https://github.com/AbdullaE100/NEW-MMSA/raw/main/Images/Shap_Analysis.png)
 *SHAP visualizations showing how each feature contributes to the sentiment prediction*
 
 ## How to Run
