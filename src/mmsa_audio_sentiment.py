@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 
+"""
+Audio sentiment analyzer for MMSA project.
+Provides emotion and sentiment analysis from audio files.
+"""
+
 import os
 import sys
 import json
+import logging
 import numpy as np
 import pandas as pd
 import librosa
+import soundfile as sf
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras.models import Model, load_model
@@ -18,8 +25,9 @@ from sklearn.metrics import accuracy_score
 import subprocess
 from tqdm import tqdm
 import warnings
-import logging
 import time
+from sklearn.preprocessing import StandardScaler
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 
 # Setup logging if not already set up
 logger = logging.getLogger('mmsa_audio')
@@ -67,7 +75,7 @@ class AudioSentimentAnalyzer:
         self.emotions = ['neutral', 'calm', 'happy', 'sad', 'angry', 'fearful', 'disgust', 'surprised']
         
         # Sentiment mapping with enhanced positive emotion weights
-        self.sentiment_weights = {
+        self.emotion_weights = {
             'happy': 1.0,       # Maximum positive (was 0.9)
             'surprised': 0.7,   # More positive (was 0.5)
             'calm': 0.5,        # Moderately positive (was 0.3)
@@ -78,16 +86,53 @@ class AudioSentimentAnalyzer:
             'angry': -0.8       # Very strong negative (was -0.9)
         }
         
+        # Store for model paths
+        self.model_path = model_path
+        self.norm_params_path = norm_params_path
+        
         # Model and normalization parameters
         self.model = None
         self.mean = None
         self.std = None
+        self.last_prediction = None
         
         # Load model if provided
         if model_path and os.path.exists(model_path):
             try:
-                self.model = load_model(model_path)
-                logger.info(f"Model loaded from {model_path}")
+                logger.info(f"Loading audio model from {model_path}")
+                
+                # Improved model loading with additional verification
+                try:
+                    # First try with custom object scope for compatibility
+                    with tf.keras.utils.custom_object_scope({'CustomLayer': tf.keras.layers.Layer}):
+                        self.model = load_model(model_path)
+                except:
+                    # Try standard loading if custom scope fails
+                    self.model = load_model(model_path)
+                
+                logger.info(f"Model loaded successfully from {model_path}")
+                
+                # Verify model is functional by checking structure
+                if hasattr(self.model, 'layers'):
+                    logger.info(f"Model has {len(self.model.layers)} layers")
+                    logger.info(f"Model input shape: {self.model.input_shape}")
+                    logger.info(f"Model output shape: {self.model.output_shape}")
+                else:
+                    logger.warning("Model structure appears invalid - missing layers attribute")
+                
+                # Try to compile the model if it's not already compiled
+                try:
+                    # Use loss and optimizer attributes as a safer way to check if compiled
+                    if not hasattr(self.model, 'optimizer') or self.model.optimizer is None:
+                        logger.warning("Model may not be compiled. Attempting to compile with default settings...")
+                        self.model.compile(
+                            optimizer='adam',
+                            loss='categorical_crossentropy',
+                            metrics=['accuracy']
+                        )
+                        logger.info("Model compiled successfully")
+                except Exception as e:
+                    logger.warning(f"Error checking/compiling model: {str(e)}")
                 
                 # If norm_params_path not provided, try to infer from model_path
                 if norm_params_path is None and model_path:
@@ -95,9 +140,13 @@ class AudioSentimentAnalyzer:
                     potential_norm_params = f"{base_path}_norm_params.json"
                     if os.path.exists(potential_norm_params):
                         norm_params_path = potential_norm_params
+                        self.norm_params_path = norm_params_path
+                        logger.info(f"Found norm params at inferred path: {norm_params_path}")
                     elif os.path.exists("audio_norm_params.json"):
                         # Try the default location as well
                         norm_params_path = "audio_norm_params.json"
+                        self.norm_params_path = norm_params_path
+                        logger.info(f"Using default norm params path: {norm_params_path}")
                 
                 # Load normalization parameters if provided or inferred
                 if norm_params_path and os.path.exists(norm_params_path):
@@ -107,18 +156,37 @@ class AudioSentimentAnalyzer:
                         self.mean = np.array(params['mean'])
                         self.std = np.array(params['std'])
                         logger.info(f"Normalization parameters loaded from {norm_params_path}")
+                        logger.info(f"Mean shape: {self.mean.shape}, Std shape: {self.std.shape}")
                     except Exception as e:
                         logger.error(f"Error loading normalization parameters: {str(e)}")
                 else:
                     logger.warning("No normalization parameters found. For best results, provide normalization parameters.")
             except Exception as e:
-                logger.error(f"Error loading model: {str(e)}")
+                logger.error(f"Error loading model: {str(e)}", exc_info=True)
+                logger.error(f"Model path: {model_path}")
+                logger.error(f"Model path exists: {os.path.exists(model_path)}")
+                
+                # Try to list files in the directory to help debugging
+                try:
+                    model_dir = os.path.dirname(model_path)
+                    if model_dir and os.path.exists(model_dir):
+                        logger.info(f"Files in model directory: {os.listdir(model_dir)}")
+                except:
+                    pass
         else:
             if model_path:
                 logger.warning(f"Model file not found: {model_path}")
+                # Try to find H5 files in the directory
+                try:
+                    model_dir = os.path.dirname(model_path) or "."
+                    h5_files = [f for f in os.listdir(model_dir) if f.endswith(".h5")]
+                    if h5_files:
+                        logger.info(f"Available H5 files: {h5_files}")
+                except:
+                    pass
             logger.warning("No model loaded. You'll need to train a model or provide a valid model path.")
         
-        logger.info(f"Using audio emotion weights: {self.sentiment_weights}")
+        logger.info(f"Using audio emotion weights: {self.emotion_weights}")
     
     def extract_audio_from_video(self, video_path, output_path=None):
         """
@@ -444,211 +512,160 @@ class AudioSentimentAnalyzer:
             file_path (str): Path to audio file
             
         Returns:
-            dict: Prediction results with emotion, confidence, and sentiment score
+            dict: Dictionary with prediction results
         """
-        if self.model is None:
-            logger.warning("No model loaded. Please train or load a model first.")
-            return {
-                'emotion': 'neutral',
-                'confidence': 0.5,
-                'all_emotions': {e: 0.0 for e in self.emotions},
-                'sentiment_score': 0.0,
-                'error': "No model loaded"
-            }
-        
         try:
-            # Extract features
-            features = self.extract_features(file_path)
-            if features is None:
-                logger.error(f"Failed to extract features from {file_path}")
-                return {
-                    'emotion': 'neutral',
-                    'confidence': 0.5,
-                    'all_emotions': {e: 0.0 for e in self.emotions},
-                    'sentiment_score': 0.0,
-                    'error': "Feature extraction failed"
-                }
+            logger.info(f"Predicting from file: {file_path}")
             
-            # Add batch dimension
-            features = np.expand_dims(features, axis=0)
+            # Ensure we have a model
+            if self.model is None:
+                # If we have a model path, try loading again
+                if self.model_path and os.path.exists(self.model_path):
+                    logger.warning("Model not loaded yet. Attempting to load from saved path...")
+                    try:
+                        self.model = load_model(self.model_path)
+                        logger.info(f"Model loaded successfully from {self.model_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to load model: {e}", exc_info=True)
+                        raise ValueError("No model available for prediction")
+                else:
+                    raise ValueError("No model available for prediction")
             
-            # Normalize if mean and std available
-            if self.mean is not None and self.std is not None:
-                features = (features - self.mean) / self.std
+            # Ensure we have normalization parameters
+            if self.mean is None or self.std is None:
+                if self.norm_params_path and os.path.exists(self.norm_params_path):
+                    logger.warning("Missing normalization parameters. Attempting to load from saved path...")
+                    try:
+                        with open(self.norm_params_path, 'r') as f:
+                            params = json.load(f)
+                        self.mean = np.array(params['mean'])
+                        self.std = np.array(params['std'])
+                        logger.info(f"Normalization parameters loaded from {self.norm_params_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to load normalization parameters: {e}", exc_info=True)
+                        raise ValueError("Missing normalization parameters required for prediction")
+                else:
+                    raise ValueError("Missing normalization parameters required for prediction")
             
-            # Advanced shape compatibility handling
-            input_shape = None
+            # Load audio file
             try:
-                # Get expected input shape from model
-                input_shape = self.model.input_shape
-                current_shape = features.shape
-                logger.debug(f"Model expects shape: {input_shape}, Current feature shape: {current_shape}")
+                audio_data, _ = librosa.load(file_path, sr=self.sampling_rate, duration=self.audio_duration)
                 
-                # Check for Conv1D vs Conv2D mismatch
-                if len(input_shape) == 3 and len(current_shape) == 4:
-                    # Model expects 3D input (batch, time_steps, features) but we have 4D
-                    # This is typically for Conv1D layers
-                    logger.info("Adapting 4D features to 3D model input (Conv1D)")
-                    features = features.squeeze(axis=-1)
+                # Check if audio data is valid
+                if len(audio_data) == 0:
+                    raise ValueError("Empty audio data")
                 
-                # Crucial fix for Conv1D models that expect a different feature dimension
-                if len(input_shape) == 3 and len(features.shape) == 3:
-                    if input_shape[1] != features.shape[1]:
-                        # Need to reshape to match the expected time_steps dimension
-                        logger.warning(f"Dimension mismatch at axis 1: model expects {input_shape[1]}, got {features.shape[1]}")
-                        
-                        # Handle case where model expects specific dimensions like (batch, 40, 1)
-                        if input_shape[2] == 1:
-                            logger.info(f"Advanced reshape for precise model compatibility")
-                            
-                            # For Conv1D, we need to match the exact expected shape (batch, 40, 1)
-                            # Determine the target shape
-                            target_shape = tuple(dim if dim is not None else features.shape[i] for i, dim in enumerate(input_shape))
-                            logger.info(f"Target model shape: {target_shape}")
-                            
-                            # 1. Reduce to single channel if needed
-                            if features.shape[2] > 1:
-                                # Take mean across features to get single channel
-                                features = np.mean(features, axis=2, keepdims=True)
-                                logger.info(f"After feature reduction: {features.shape}")
-                            
-                            # 2. Resize time dimension to match expected input
-                            original_time_steps = features.shape[1]
-                            target_time_steps = input_shape[1]
-                            
-                            if original_time_steps != target_time_steps:
-                                # Resize to match expected time steps
-                                # Option 1: Truncate or pad if reasonable
-                                if original_time_steps > target_time_steps:
-                                    # Truncate - take center portion
-                                    start = (original_time_steps - target_time_steps) // 2
-                                    features = features[:, start:start+target_time_steps, :]
-                                    logger.info(f"Truncated time steps from {original_time_steps} to {target_time_steps}")
-                                else:
-                                    # Pad with zeros
-                                    pad_width = ((0, 0), (0, target_time_steps - original_time_steps), (0, 0))
-                                    features = np.pad(features, pad_width, mode='constant')
-                                    logger.info(f"Padded time steps from {original_time_steps} to {target_time_steps}")
-                            
-                            logger.info(f"Final features shape: {features.shape}")
-                            
-                            # One final check to ensure the shape is compatible
-                            if features.shape[1:] != input_shape[1:]:
-                                logger.warning(f"Shape mismatch persists. Model expects {input_shape[1:]} but got {features.shape[1:]}")
-                                
-                                # As a last resort, completely reshape to target dimensions
-                                # This is not ideal for accuracy but will at least make the model run
-                                batch_size = features.shape[0]
-                                try:
-                                    # Completely reshape to match expected dimensions - preserving batch size
-                                    features = np.reshape(features, (batch_size,) + input_shape[1:])
-                                    logger.info(f"Force-reshaped features to {features.shape}")
-                                except Exception as e:
-                                    logger.error(f"Reshape failed: {str(e)}")
+                # Print some metadata for debugging
+                logger.info(f"Audio data shape: {audio_data.shape}")
+                logger.info(f"Audio data min/max: {np.min(audio_data)}/{np.max(audio_data)}")
+                logger.info(f"Audio data mean/std: {np.mean(audio_data)}/{np.std(audio_data)}")
                 
-                elif len(input_shape) == 4 and len(current_shape) == 3:
-                    # Model expects 4D input (batch, height, width, channels) but we have 3D
-                    # This is typically for Conv2D layers
-                    logger.info("Adapting 3D features to 4D model input (Conv2D)")
-                    features = np.expand_dims(features, axis=-1)
+                # Extract features
+                mfccs = librosa.feature.mfcc(y=audio_data, sr=self.sampling_rate, n_mfcc=self.n_mfcc)
                 
-                # Check for channel dimension mismatch in 4D tensors
-                elif (len(input_shape) == 4 and len(current_shape) == 4 and 
-                      input_shape[-1] != current_shape[-1] and input_shape[-1] is not None):
-                    logger.info(f"Reshaping features to match expected channels: {input_shape[-1]}")
-                    features = np.reshape(features, (current_shape[0], current_shape[1], 
-                                               current_shape[2], input_shape[-1]))
+                # Log shapes for debugging
+                logger.info(f"MFCC shape: {mfccs.shape}")
+                logger.info(f"Mean shape: {self.mean.shape}, Std shape: {self.std.shape}")
                 
-                # Check if we need to match exact dimensions for middle axes
-                for i in range(1, min(len(input_shape), len(features.shape))-1):
-                    if input_shape[i] is not None and features.shape[i] != input_shape[i]:
-                        logger.warning(f"Dimension mismatch at axis {i}: model expects {input_shape[i]}, got {features.shape[i]}")
-            except Exception as e:
-                logger.warning(f"Failed to adapt feature shape: {str(e)}")
-            
-            # Predict
-            logger.debug(f"Running prediction with feature shape: {features.shape}")
-            try:
-                prediction = self.model.predict(features, verbose=0)[0]
+                # Handle different shapes and dimensions for normalization
+                if len(self.mean.shape) == 3 and self.mean.shape[-1] == 1:  # If mean has shape (30, 216, 1)
+                    # Reshape MFCCs to match normalization parameters
+                    mfccs_reshaped = np.expand_dims(mfccs, axis=-1)  # Shape becomes (30, t, 1)
+                    logger.info(f"Reshaped MFCCs to: {mfccs_reshaped.shape}")
+                    
+                    # Adjust mean and std shapes for broadcasting if needed
+                    if self.mean.shape[1] == 1:
+                        # If mean has shape (30, 1, 1), we need to broadcast it
+                        mean_broadcast = np.broadcast_to(self.mean, (self.mean.shape[0], mfccs_reshaped.shape[1], 1))
+                        std_broadcast = np.broadcast_to(self.std, (self.std.shape[0], mfccs_reshaped.shape[1], 1))
+                        logger.info(f"Broadcasting normalization params to match MFCC shape")
+                        # Normalize
+                        mfccs_norm = (mfccs_reshaped - mean_broadcast) / std_broadcast
+                    elif self.mean.shape[1] == 216 and mfccs_reshaped.shape[1] != 216:
+                        # If MFCCs have different time dimension, resize
+                        logger.info(f"Resizing MFCCs time dimension from {mfccs_reshaped.shape[1]} to 216")
+                        # Resize time dimension to match norm params
+                        from scipy.ndimage import zoom
+                        zoom_factor = 216 / mfccs_reshaped.shape[1]
+                        mfccs_resized = zoom(mfccs_reshaped, (1, zoom_factor, 1), order=1)
+                        logger.info(f"Resized MFCCs to: {mfccs_resized.shape}")
+                        mfccs_norm = (mfccs_resized - self.mean) / self.std
+                    else:
+                        # Standard normalization with broadcasting
+                        mfccs_norm = (mfccs_reshaped - self.mean) / self.std
+                elif len(self.mean.shape) == 4 and self.mean.shape[1] == 1:  # If mean has shape (30, 1, 216, 1)
+                    # Handle the case where mean and std have an extra dimension
+                    mfccs_reshaped = np.expand_dims(mfccs, axis=-1)  # Shape becomes (30, t, 1)
+                    logger.info(f"Reshaped MFCCs to: {mfccs_reshaped.shape}")
+                    
+                    # Remove the extra dimension from mean and std
+                    mean_reshaped = np.squeeze(self.mean, axis=1)  # Shape becomes (30, 216, 1)
+                    std_reshaped = np.squeeze(self.std, axis=1)    # Shape becomes (30, 216, 1)
+                    logger.info(f"Reshaped mean to: {mean_reshaped.shape}, std to: {std_reshaped.shape}")
+                    
+                    if mfccs_reshaped.shape[1] != 216:
+                        # If MFCCs have different time dimension, resize
+                        logger.info(f"Resizing MFCCs time dimension from {mfccs_reshaped.shape[1]} to 216")
+                        from scipy.ndimage import zoom
+                        zoom_factor = 216 / mfccs_reshaped.shape[1]
+                        mfccs_resized = zoom(mfccs_reshaped, (1, zoom_factor, 1), order=1)
+                        logger.info(f"Resized MFCCs to: {mfccs_resized.shape}")
+                        mfccs_norm = (mfccs_resized - mean_reshaped) / std_reshaped
+                    else:
+                        # Standard normalization
+                        mfccs_norm = (mfccs_reshaped - mean_reshaped) / std_reshaped
+                else:
+                    # Fallback case for simpler shapes
+                    logger.info("Using simple normalization approach with reshape")
+                    # Reshape mean and std to make them compatible with broadcasting
+                    mean_flat = np.reshape(self.mean, (self.mean.shape[0], -1))[:, 0]
+                    std_flat = np.reshape(self.std, (self.std.shape[0], -1))[:, 0]
+                    
+                    # Apply normalization with broadcasting
+                    mfccs_norm = ((mfccs.T - mean_flat) / std_flat).T
+                    # Add channel dimension
+                    mfccs_norm = np.expand_dims(mfccs_norm, axis=-1)
+                
+                logger.info(f"Normalized MFCCs shape: {mfccs_norm.shape}")
+                
+                # Reshape for model input (add batch dimension)
+                mfccs_shaped = np.expand_dims(mfccs_norm, axis=0)
+                logger.info(f"Final input shape to model: {mfccs_shaped.shape}")
+                
+                # Get model prediction
+                logger.info("Making prediction with model...")
+                prediction = self.model.predict(mfccs_shaped)[0]
+                
+                # Get predicted emotion
                 emotion_idx = np.argmax(prediction)
                 emotion = self.emotions[emotion_idx]
-                confidence = float(prediction[emotion_idx])
+                confidence = prediction[emotion_idx]
                 
-                # Map to sentiment score
-                sentiment_score = self.sentiment_weights.get(emotion, 0.0)
+                # Calculate sentiment score based on emotion and weights
+                sentiment_score = self.emotion_weights.get(emotion, 0) * confidence
                 
-                # Create result
+                # Create result dictionary
                 result = {
                     'emotion': emotion,
-                    'confidence': confidence,
+                    'confidence': float(confidence),
                     'all_emotions': {e: float(prediction[i]) for i, e in enumerate(self.emotions)},
-                    'sentiment_score': sentiment_score
+                    'sentiment_score': float(sentiment_score)
                 }
                 
-                return result
-            except Exception as e:
-                logger.error(f"Error in model prediction: {str(e)}")
-                logger.warning("Using fallback prediction method")
+                # Save the prediction for reference
+                self.last_prediction = result
                 
-                # Fallback: Use a simplified heuristic based on audio characteristics
-                try:
-                    # Calculate basic audio statistics as a simple fallback
-                    audio_data, _ = librosa.load(file_path, sr=self.sampling_rate, duration=self.audio_duration)
-                    
-                    # Calculate energy and other basic features
-                    energy = np.mean(librosa.feature.rms(y=audio_data))
-                    zero_crossing_rate = np.mean(librosa.feature.zero_crossing_rate(y=audio_data))
-                    spectral_centroid = np.mean(librosa.feature.spectral_centroid(y=audio_data, sr=self.sampling_rate))
-                    
-                    # Simple heuristic for emotion
-                    # High energy + high zero crossing rate often correlates with anger/excitement
-                    # Low energy often correlates with sadness/calmness
-                    if energy > 0.1 and zero_crossing_rate > 0.05:
-                        fallback_emotion = 'angry' if spectral_centroid > 2000 else 'surprised'
-                        confidence = min(energy * 5, 0.7)  # Cap at 0.7 confidence
-                        sentiment_score = -0.6 if fallback_emotion == 'angry' else 0.3
-                    elif energy < 0.05:
-                        fallback_emotion = 'sad'
-                        confidence = min((1 - energy * 10), 0.6)
-                        sentiment_score = -0.7
-                    else:
-                        fallback_emotion = 'neutral'
-                        confidence = 0.5
-                        sentiment_score = 0.0
-                    
-                    logger.info(f"Fallback prediction: {fallback_emotion} (confidence: {confidence:.2f})")
-                    
-                    return {
-                        'emotion': fallback_emotion,
-                        'confidence': float(confidence),
-                        'all_emotions': {e: (0.7 if e == fallback_emotion else 0.0) for e in self.emotions},
-                        'sentiment_score': sentiment_score,
-                        'fallback': True,
-                        'fallback_reason': str(e)
-                    }
-                except Exception as fallback_error:
-                    logger.error(f"Fallback prediction also failed: {str(fallback_error)}")
-                    # Last resort - return neutral with low confidence
-                    return {
-                        'emotion': 'neutral',
-                        'confidence': 0.5,
-                        'all_emotions': {e: 0.0 for e in self.emotions},
-                        'sentiment_score': 0.0,
-                        'error': str(e),
-                        'fallback': True
-                    }
-            
+                logger.info(f"Prediction result: {result}")
+                return result
+                
+            except Exception as e:
+                logger.error(f"Error in model prediction: {str(e)}", exc_info=True)
+                raise
+                
         except Exception as e:
-            logger.error(f"Error predicting from audio: {str(e)}", exc_info=True)
-            
-            # Return a default result on error with error information
-            return {
-                'emotion': 'neutral',
-                'confidence': 0.5,
-                'all_emotions': {e: 0.0 for e in self.emotions},
-                'sentiment_score': 0.0,
-                'error': str(e)
-            }
+            logger.error(f"Error in audio prediction: {str(e)}", exc_info=True)
+            # Re-raise the exception to let the caller handle it
+            raise
     
     def predict_from_video(self, video_path):
         """
@@ -753,60 +770,117 @@ def analyze_video(self, video_path):
         return self.predict_from_video(video_path)
 
 def main():
-    """
-    Main function for testing the audio sentiment analyzer
-    """
+    """Run a simple test of the audio sentiment analyzer"""
     import argparse
     
-    parser = argparse.ArgumentParser(description='Audio Sentiment Analysis')
-    parser.add_argument('--train', action='store_true', help='Train a new model')
-    parser.add_argument('--data', type=str, default='ravdess_data', help='Path to training data')
-    parser.add_argument('--model', type=str, default='audio_sentiment_model.h5', help='Path to model file')
-    parser.add_argument('--input', type=str, help='Audio or video file to analyze')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    
+    parser = argparse.ArgumentParser(description="Test the audio sentiment analyzer")
+    parser.add_argument("--model", type=str, default="./audio_sentiment_model_notebook.h5",
+                        help="Path to the audio sentiment model")
+    parser.add_argument("--norm-params", type=str, default="./audio_norm_params.json",
+                        help="Path to the normalization parameters")
+    parser.add_argument("--audio", type=str, default=None,
+                        help="Path to an audio file to analyze (optional)")
     args = parser.parse_args()
     
-    # Determine norm params path based on model path
-    norm_params_path = os.path.splitext(args.model)[0] + '_norm_params.json'
+    # Set up logging to console
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
     
-    # Create analyzer
+    # Initialize the analyzer
+    logger.info("Initializing audio sentiment analyzer...")
     analyzer = AudioSentimentAnalyzer(
-        model_path=None if args.train else args.model,
-        norm_params_path=None if args.train else norm_params_path
+        model_path=args.model,
+        norm_params_path=args.norm_params
     )
     
-    # Train or predict
-    if args.train:
-        logger.info(f"Training new model with data from {args.data}")
-        results = analyzer.train(args.data, epochs=args.epochs, save_path=args.model)
-        if results:
-            logger.info(f"Training completed with accuracy: {results['accuracy'] * 100:.2f}%")
+    # Check if model loaded
+    if analyzer.model is None:
+        logger.error("Model failed to load. Exiting.")
+        return 1
     
-    elif args.input:
-        if not analyzer.model:
-            logger.warning("No model loaded. Please train a model or provide a valid model path.")
-            return
-        
-        logger.info(f"Analyzing {args.input}...")
-        
-        # Detect if input is audio or video
-        if args.input.lower().endswith(('.mp3', '.wav', '.flac', '.ogg', '.m4a')):
-            result = analyzer.predict_from_file(args.input)
-        else:
-            result = analyzer.predict_from_video(args.input)
-        
-        if result:
-            logger.info(f"Emotion: {result['emotion']} (Confidence: {result['confidence']:.4f})")
-            logger.info(f"Sentiment Score: {result['sentiment_score']:.2f}")
-            logger.info("All emotions:")
-            for emotion, score in sorted(result['all_emotions'].items(), key=lambda x: x[1], reverse=True):
-                logger.info(f"  {emotion}: {score:.4f}")
-        else:
-            logger.warning("Analysis failed.")
-    
+    # Process audio file if provided
+    if args.audio and os.path.exists(args.audio):
+        logger.info(f"Analyzing audio file: {args.audio}")
+        result = analyzer.predict_from_file(args.audio)
+        logger.info(f"Analysis result: {result}")
     else:
-        logger.warning("No action specified. Use --train to train a model or --input to analyze a file.")
+        # Try to find some sample audio files
+        logger.info("Looking for sample audio files...")
+        import glob
+        
+        # Look in common directories
+        potential_dirs = [
+            "./examples", 
+            "../examples", 
+            "./data",
+            "../data",
+            "./assets",
+            "../assets",
+            "./samples",
+            "../samples"
+        ]
+        
+        # Look for audio files with common extensions
+        audio_files = []
+        for dir_path in potential_dirs:
+            if os.path.exists(dir_path):
+                for ext in ["*.wav", "*.mp3", "*.m4a", "*.ogg"]:
+                    audio_files.extend(glob.glob(os.path.join(dir_path, ext)))
+        
+        if audio_files:
+            # Use the first audio file found
+            sample_audio = audio_files[0]
+            logger.info(f"Found sample audio file: {sample_audio}")
+            result = analyzer.predict_from_file(sample_audio)
+            logger.info(f"Analysis result: {result}")
+        else:
+            logger.warning("No sample audio files found. Creating a test audio file...")
+            
+            # Create a simple sine wave audio as a test
+            import numpy as np
+            from scipy.io import wavfile
+            
+            # Create a temporary directory
+            os.makedirs("./tmp_audio", exist_ok=True)
+            
+            # Generate simple sine waves for different emotions
+            sample_rate = 44100
+            duration = 3  # seconds
+            t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+            
+            # Happy: higher frequency, amplitude variations
+            happy_signal = 0.5 * np.sin(2 * np.pi * 440 * t) + 0.3 * np.sin(2 * np.pi * 880 * t)
+            happy_signal *= (1 + 0.2 * np.sin(2 * np.pi * 2 * t))  # amplitude modulation
+            happy_path = "./tmp_audio/test_happy.wav"
+            wavfile.write(happy_path, sample_rate, (happy_signal * 32767).astype(np.int16))
+            
+            # Sad: lower frequency, slower amplitude
+            sad_signal = 0.7 * np.sin(2 * np.pi * 220 * t)
+            sad_signal *= (1 + 0.1 * np.sin(2 * np.pi * 0.5 * t))  # slow modulation
+            sad_path = "./tmp_audio/test_sad.wav"
+            wavfile.write(sad_path, sample_rate, (sad_signal * 32767).astype(np.int16))
+            
+            # Neutral: mid-range frequency, little variation
+            neutral_signal = 0.5 * np.sin(2 * np.pi * 330 * t)
+            neutral_path = "./tmp_audio/test_neutral.wav"
+            wavfile.write(neutral_path, sample_rate, (neutral_signal * 32767).astype(np.int16))
+            
+            # Test each generated audio
+            for audio_path, emotion in [(happy_path, "happy"), (sad_path, "sad"), (neutral_path, "neutral")]:
+                logger.info(f"Testing with generated {emotion} audio: {audio_path}")
+                result = analyzer.predict_from_file(audio_path)
+                logger.info(f"Analysis result: {result}")
+                
+                # Check if the score is 0.0 (indicating potential issues)
+                if abs(result.get('sentiment_score', 0.0)) < 0.01:
+                    logger.warning(f"Zero sentiment score detected for {emotion} audio - model may not be working correctly")
+    
+    logger.info("Audio sentiment test complete")
+    return 0
 
 if __name__ == "__main__":
-    main() 
+    sys.exit(main()) 

@@ -240,8 +240,12 @@ class TextSentimentAnalyzer:
         # Map to sentiment score on a scale from -1 to 1
         sentiment_score = self.sentiment_mapping.get(label.lower(), 0)
         
-        # Adjust score by confidence
-        adjusted_score = sentiment_score * confidence
+        # Adjust score by confidence - more pronounced to avoid neutral bias
+        adjusted_score = sentiment_score * (confidence ** 0.8)  # Using a power less than 1 to enhance low confidence signals
+        
+        # Log the prediction details
+        logger.info(f"Text sentiment prediction: '{processed_text}' -> {label} (conf: {confidence:.2f}, score: {adjusted_score:.2f})")
+        logger.info(f"Raw scores: {[(self.id2label[i], float(scores[i])) for i in ranking[:3]]}")
         
         return label, confidence, adjusted_score
 
@@ -283,16 +287,24 @@ class TextSentimentAnalyzer:
             
             # 4. Choose the best result based on confidence and hint bias
             # If we have emotion hints, prefer higher confidence non-neutral predictions
-            neutral_threshold = 0.95 if emotion_hints["neutral"] < 0.8 else 0.8
+            # Lower threshold to avoid neutrals over-classifying
+            neutral_threshold = 0.85 if emotion_hints["neutral"] < 0.8 else 0.7
             
             # Filter non-neutral predictions with good confidence
-            non_neutral = [r for r in results if r["label"] != "neutral" or r["confidence"] < neutral_threshold]
+            non_neutral = [r for r in results if r["label"].lower() != "neutral" or r["confidence"] < neutral_threshold]
             
             # If we have non-neutral candidates, use them, otherwise use all results
             candidates = non_neutral if non_neutral else results
             
-            # Sort by confidence and choose the best
-            candidates.sort(key=lambda x: x["confidence"], reverse=True)
+            # Sort by confidence and choose the best (but favor non-neutral slightly)
+            # This gives a small boost to non-neutral predictions to counteract the neutral bias
+            for c in candidates:
+                if c["label"].lower() != "neutral":
+                    c["sorting_score"] = c["confidence"] * 1.15  # 15% boost for non-neutral
+                else:
+                    c["sorting_score"] = c["confidence"]
+                    
+            candidates.sort(key=lambda x: x["sorting_score"], reverse=True)
             best_result = candidates[0]
             
             # 5. Adjust confidence if we have emotion hints
@@ -300,8 +312,8 @@ class TextSentimentAnalyzer:
             final_confidence = best_result["confidence"]
             final_score = best_result["score"]
             
-            # If we have a neutral result but strong emotion hints, adjust the confidence
-            if final_label == "neutral" and emotion_hints["neutral"] < 0.7:
+            # If we have a neutral result but strong emotion hints, adjust the confidence more aggressively
+            if final_label.lower() == "neutral" and emotion_hints["neutral"] < 0.7:
                 final_confidence *= emotion_hints["neutral"]
                 
                 # Determine new sentiment bias based on emotion hints
@@ -312,15 +324,33 @@ class TextSentimentAnalyzer:
                     final_label = "negative"
                     hint_score = emotion_hints["negative"] * self.sentiment_mapping["negative"]
                     
-                # Blend scores based on hint confidence
-                hint_weight = 1.0 - emotion_hints["neutral"]
+                # Blend scores with more weight toward hints to avoid neutrality
+                hint_weight = min(0.8, 1.0 - emotion_hints["neutral"] * 0.8)  # Cap at 0.8 but use more hint weight
                 final_score = (final_score * (1.0 - hint_weight)) + (hint_score * hint_weight)
                 logger.info(f"Adjusted neutral result using emotion hints: {final_label}, score: {final_score}")
+            
+            # Add expected_sentiment as a hint if provided
+            if expected_sentiment is not None:
+                # Only apply if expected_sentiment is non-neutral and our current score is weak
+                if abs(expected_sentiment) > 0.2 and abs(final_score) < 0.3:
+                    # Blend with expected sentiment (weak influence of 30%)
+                    blend_weight = 0.3
+                    blended_score = (final_score * (1.0 - blend_weight)) + (expected_sentiment * blend_weight)
+                    logger.info(f"Adjusted score using expected sentiment: {final_score:.2f} -> {blended_score:.2f}")
+                    final_score = blended_score
+                    
+                    # Update label if score changed significantly
+                    if final_score > 0.2 and final_label.lower() != "positive":
+                        final_label = "positive"
+                        logger.info(f"Updated label based on expected sentiment: {final_label}")
+                    elif final_score < -0.2 and final_label.lower() != "negative":
+                        final_label = "negative"
+                        logger.info(f"Updated label based on expected sentiment: {final_label}")
             
             # Log final results
             logger.info(f"Text sentiment: {final_label} (Confidence: {final_confidence:.2f}, Score: {final_score:.2f})")
             
-            # Return results
+            # Return results with comprehensive fields
             return {
                 "sentiment": final_label.capitalize(),
                 "confidence": float(final_confidence),
@@ -329,7 +359,8 @@ class TextSentimentAnalyzer:
                 "emotion_hints": emotion_hints,
                 "all_scores": {
                     self.id2label[i]: float(scores[i]) for i in range(len(scores))
-                } if 'scores' in locals() else {}
+                } if 'scores' in locals() else {},
+                "enhanced": len(texts_to_analyze) > 1
             }
             
         except Exception as e:

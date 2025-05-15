@@ -86,6 +86,21 @@ class MultimodalSentimentGradio:
         self.allow_fallback = allow_fallback
         self.apply_happy_heuristic = True  # Enable happy heuristic by default
         
+        # Initialize speech transcription ability
+        self.speech_transcriber = True if WHISPER_AVAILABLE or SPEECH_RECOGNITION_AVAILABLE else False
+        
+        # Initialize score storage attributes
+        self.visual_score = 0.0
+        self.visual_confidence = 0.0
+        self.audio_score = 0.0
+        self.audio_confidence = 0.0
+        self.text_score = 0.0
+        self.text_confidence = 0.0
+        self.overall_score = 0.0
+        self.overall_confidence = 0.0
+        self.last_transcript = ""
+        self.last_video_path = None
+        
         # Find model files if not provided
         if audio_model_path is None:
             # Search in multiple locations
@@ -168,10 +183,12 @@ class MultimodalSentimentGradio:
         # Initialize text sentiment analyzer
         if TRANSFORMERS_AVAILABLE:
             try:
-                self.text_analyzer = pipeline("sentiment-analysis")
-                logger.info("Text sentiment analysis enabled")
+                # Use our custom RoBERTa text sentiment analyzer
+                from mmsa_text_sentiment import TextSentimentAnalyzer
+                self.text_analyzer = TextSentimentAnalyzer(model_name="cardiffnlp/twitter-roberta-base-sentiment-latest")
+                logger.info(f"Text sentiment analysis enabled with model: {self.text_analyzer.model_name}")
             except Exception as e:
-                logger.error(f"Error initializing text analyzer: {str(e)}")
+                logger.error(f"Error initializing RoBERTa text analyzer: {str(e)}")
                 self.text_analyzer = None
         else:
             self.text_analyzer = None
@@ -401,6 +418,12 @@ class MultimodalSentimentGradio:
                     if visual_results and visual_results.get('dominant_emotion_confidence', 0) > 0:
                         logger.info(f"Successful visual analysis with {backend}")
                         
+                        # Save the visual scores and emotion information for later use
+                        self.visual_score = visual_results.get('sentiment_score', 0)
+                        self.visual_confidence = visual_results.get('dominant_emotion_confidence', 0)
+                        logger.info(f"Visual sentiment: {visual_results.get('dominant_emotion', 'unknown')} "
+                                   f"(Score: {self.visual_score:.2f}, Confidence: {self.visual_confidence:.2f})")
+                        
                         # Apply happy heuristic to improve sentiment detection
                         if self.apply_happy_heuristic:
                             original_score = visual_results.get('sentiment_score', 0)
@@ -410,6 +433,7 @@ class MultimodalSentimentGradio:
                             if adjusted_score != original_score:
                                 visual_results['original_sentiment_score'] = original_score
                                 visual_results['sentiment_score'] = adjusted_score
+                                self.visual_score = adjusted_score  # Update stored score with adjusted value
                                 logger.info(f"Applied sentiment enhancement: {original_score:.2f} -> {adjusted_score:.2f}")
                         
                         break
@@ -417,6 +441,20 @@ class MultimodalSentimentGradio:
                         logger.warning(f"Visual analysis with {backend} produced invalid results")
                 except Exception as e:
                     logger.warning(f"Error with {backend} backend: {str(e)}")
+            
+            # If we still don't have valid visual results, set default values
+            if not visual_results or not hasattr(self, 'visual_score'):
+                logger.warning("No valid visual results obtained, using defaults")
+                self.visual_score = 0.0
+                self.visual_confidence = 0.0
+                
+                # Create minimal visual results to avoid NoneType errors
+                visual_results = {
+                    "dominant_emotion": "unknown",
+                    "dominant_emotion_confidence": 0.0,
+                    "emotion_distribution": {"neutral": 1.0},
+                    "sentiment_score": 0.0
+                }
             
             # Process video for audio sentiment
             audio_results = self.audio_analyzer.predict_from_video(video_input)
@@ -501,48 +539,64 @@ class MultimodalSentimentGradio:
     
     def analyze_text(self, text_input):
         """
-        Analyze sentiment from text input
+        Analyze text sentiment using the text sentiment analyzer
         
         Args:
-            text_input: Text string from Gradio
+            text_input (str): Text to analyze
             
         Returns:
-            dict: Analysis results
+            dict: Analysis results with sentiment score, classification, and confidence
         """
         try:
-            if not text_input or text_input.strip() == "":
-                return {"error": "Please enter some text"}
-            
+            # Use the text sentiment analyzer
             if self.text_analyzer:
-                # Use transformers pipeline
-                result = self.text_analyzer(text_input)[0]
+                result = self.text_analyzer.analyze(text_input)
                 
-                # Map to our scale (-1 to 1)
-                label = result["label"]
-                score = result["score"]
+                # Check for errors
+                if 'error' in result:
+                    logger.warning(f"Text analysis error: {result['error']}")
+                    return {
+                        'sentiment_score': 0,
+                        'classification': 'neutral',
+                        'confidence': 0.5,
+                        'error': result['error']
+                    }
                 
-                if label.lower() == "positive":
-                    sentiment_score = score
-                elif label.lower() == "negative":
-                    sentiment_score = -score
-                else:
-                    sentiment_score = 0
+                # Process valid results
+                sentiment_score = result.get('sentiment_score', 0)
+                confidence = result.get('confidence', 0)
+                classification = result.get('sentiment', 'Neutral')
                 
-                logger.info(f"Text sentiment: {label} (Confidence: {score:.2f}, Score: {sentiment_score:.2f})")
+                # Store for later use
+                self.text_score = sentiment_score
+                self.text_confidence = confidence
+                self.last_transcript = text_input
                 
+                # Log results
+                logger.info(f"Text sentiment: {classification} (Confidence: {confidence:.2f}, Score: {sentiment_score:.2f})")
+                
+                # Return formatted results
                 return {
-                    "sentiment": label,
-                    "confidence": score,
-                    "sentiment_score": sentiment_score,
-                    "text": text_input
+                    'sentiment_score': sentiment_score,
+                    'classification': classification.lower(),
+                    'confidence': confidence
                 }
             else:
-                logger.warning("Text analysis unavailable - transformers not loaded")
-                return {"error": "Text sentiment analysis not available"}
-        
+                logger.warning("No text analyzer available")
+                return {
+                    'sentiment_score': 0,
+                    'classification': 'neutral',
+                    'confidence': 0.5,
+                    'error': 'Text analysis not available'
+                }
         except Exception as e:
             logger.error(f"Error analyzing text: {str(e)}", exc_info=True)
-            return {"error": f"Error analyzing text: {str(e)}"}
+            return {
+                'sentiment_score': 0,
+                'classification': 'neutral',
+                'confidence': 0.5,
+                'error': str(e)
+            }
     
     def _score_to_sentiment(self, score):
         """Convert numerical score to sentiment category"""
@@ -557,473 +611,437 @@ class MultimodalSentimentGradio:
         """Get emoticon for sentiment category - no longer used in the redesigned interface"""
         return ""
     
-    def process_multimodal(self, video_input=None, audio_input=None, text_input=None):
+    def process_multimodal(self, video_input, audio_input=None, text_input=None):
         """
-        Process multimodal inputs and return combined results
+        Process multimodal inputs (video, audio, text) for sentiment analysis
         
         Args:
-            video_input: Video file
-            audio_input: Audio file
-            text_input: Text string (only used if no transcription is available)
+            video_input: Video file from Gradio
+            audio_input: Audio file from Gradio (optional)
+            text_input: Text input from Gradio (optional)
             
         Returns:
-            tuple: HTML result, sentiment score, pie chart of modalities
+            tuple: (result_html, sentiment_score, chart_output)
         """
-        results = {}
-        scores = []
-        labels = []
-        modalities_used = []
-        confidence_scores = []
+        logger.info(f"Processing inputs: Video={video_input is not None}, Audio={audio_input is not None}, Text={text_input is not None}")
         
-        # Define weights for different modalities (updated weights)
-        weights = {'video': 0.45, 'audio': 0.45, 'text': 0.10}
+        # Initialize results
+        visual_results = None
+        audio_results = None
+        text_results = None
+        transcript = None
+        final_score = 0
+        final_confidence = 0
         
-        # Create mapping from included_modalities labels to weight keys
-        modality_mapping = {
-            'visual': 'video',
-            'audio': 'audio',
-            'text': 'text'
-        }
+        # Track start time
+        start_time = time.time()
         
-        logger.info(f"Processing inputs: Video={video_input is not None}, Audio={audio_input is not None}, Text={text_input is not None and text_input.strip() != ''}")
+        # If video is provided, extract visual, audio and transcript
+        if video_input is not None:
+            # 1. Process video for visual sentiment
+            logger.info("Processing video input...")
+            visual_results = self.analyze_video(video_input)
+            
+            # Store video path
+            self.last_video_path = video_input if isinstance(video_input, str) else (
+                video_input.get('path', None) if isinstance(video_input, dict) else None
+            )
+            
+            # 2. Extract audio for audio sentiment if no separate audio provided
+            if audio_input is None and self.audio_analyzer is not None:
+                # Get the actual path
+                video_path = self._get_path_from_input(video_input)
+                
+                if video_path:
+                    try:
+                        audio_results = self.audio_analyzer.predict_from_video(video_path)
+                        if audio_results:
+                            # Store audio scores
+                            self.audio_score = audio_results.get('sentiment_score', 0)
+                            self.audio_confidence = audio_results.get('confidence', 0)
+                            logger.info(f"Audio sentiment: {audio_results.get('emotion', 'unknown')} "
+                                      f"(Score: {self.audio_score:.2f}, Confidence: {self.audio_confidence:.2f})")
+                        else:
+                            logger.warning("No audio results returned from analyzer")
+                    except Exception as e:
+                        logger.error(f"Error processing audio from video: {str(e)}")
+            
+            # 3. Transcribe speech if no separate text provided
+            if text_input is None and self.speech_transcriber:
+                logger.info("Transcribing speech from video...")
+                transcript = self._transcribe_video(video_input)
+                
+                if transcript:
+                    # Store transcript
+                    self.last_transcript = transcript
+                    
+                    # Analyze transcript for sentiment
+                    if self.text_analyzer:
+                        logger.info(f"Analyzing transcribed text: {transcript}")
+                        text_results = self.analyze_text(transcript)
+                        # Store text scores (already stored in analyze_text)
+                
+        # If separate audio input provided
+        if audio_input is not None and self.audio_analyzer is not None:
+            try:
+                audio_results = self.audio_analyzer.predict_from_file(audio_input)
+                if audio_results:
+                    # Store audio scores
+                    self.audio_score = audio_results.get('sentiment_score', 0)
+                    self.audio_confidence = audio_results.get('confidence', 0)
+                    logger.info(f"Audio sentiment: {audio_results.get('emotion', 'unknown')} "
+                              f"(Score: {self.audio_score:.2f}, Confidence: {self.audio_confidence:.2f})")
+            except Exception as e:
+                logger.error(f"Error processing audio input: {str(e)}")
         
-        try:
-            # Process video input (including auto-transcription if possible)
-            if video_input is not None:
-                logger.info("Processing video input...")
-                video_res = self.analyze_video(video_input)
-                if video_res and not "error" in video_res:
-                    results["video"] = video_res
-                    
-                    # Get combined score from video analysis (visual+audio+transcribed text)
-                    if "combined_score" in video_res:
-                        score = video_res["combined_score"]
-                        
-                        # Determine what modalities are included
-                        included_modalities = []
-                        if "visual" in video_res and video_res["visual"]:
-                            included_modalities.append("Visual")
-                        if "audio" in video_res and video_res["audio"]:
-                            included_modalities.append("Audio")
-                        if "text" in video_res and video_res["text"]:
-                            included_modalities.append("Text (Transcribed)")
-                        
-                        modality = " + ".join(included_modalities)
-                        # Calculate the weight based on included modalities
-                        weight = 0
-                        for m in included_modalities:
-                            # Extract the base modality name (first word, lowercase)
-                            m_key = m.lower().split()[0]  
-                            # Map the modality key to the correct weight key
-                            weight_key = modality_mapping.get(m_key, m_key)
-                            # Get the weight or default to 0.1
-                            weight += weights.get(weight_key, 0.1)
-                    else:
-                        # Just visual score
-                        score = video_res.get("visual", {}).get("sentiment_score", 0)
-                        modality = "Video"
-                        weight = weights['video']  # Map "Video" to "video" key
-                    
-                    confidence = video_res.get("visual", {}).get("dominant_emotion_confidence", 0.5)
-                    
-                    scores.append(score)
-                    labels.append(modality)
-                    modalities_used.append("video")
-                    confidence_scores.append(confidence)
-                    
-                    logger.info(f"Video score: {score}, confidence: {confidence}")
-                    
-                    # Store transcribed text
-                    if "transcribed_text" in video_res and video_res["transcribed_text"]:
-                        results["transcribed_text"] = video_res["transcribed_text"]
-                else:
-                    logger.warning("Video analysis failed or returned an error")
+        # If separate text input provided
+        if text_input is not None and self.text_analyzer is not None:
+            text_results = self.analyze_text(text_input)
+            # Text scores are stored in analyze_text
+        
+        # Calculate combined sentiment score with modality weights
+        if visual_results or audio_results or text_results:
+            # Create array of available modality scores and confidences
+            scores = []
+            confidences = []
+            modalities = []
             
-            # Process audio input (only if not already analyzed with video)
-            if audio_input is not None and "video" not in results:
-                logger.info("Processing audio input...")
-                audio_res = self.analyze_audio(audio_input)
-                if audio_res and not "error" in audio_res:
-                    results["audio"] = audio_res
-                    
-                    score = audio_res.get("sentiment_score", 0)
-                    confidence = audio_res.get("confidence", 0.5)
-                    
-                    scores.append(score)
-                    labels.append("Audio")
-                    modalities_used.append("audio")
-                    confidence_scores.append(confidence)
-                    
-                    logger.info(f"Audio score: {score}, confidence: {confidence}")
-                else:
-                    logger.warning("Audio analysis failed or returned an error")
+            # Visual contribution
+            if visual_results and hasattr(self, 'visual_score'):
+                scores.append(self.visual_score)
+                confidences.append(self.visual_confidence)
+                modalities.append('visual')
             
-            # Process manual text input (only if provided and no transcription available)
-            if text_input is not None and text_input.strip() != "" and "transcribed_text" not in results:
-                logger.info("Processing manual text input...")
-                text_res = self.analyze_text(text_input)
-                if text_res and not "error" in text_res:
-                    results["text"] = text_res
-                    
-                    score = text_res.get("sentiment_score", 0)
-                    confidence = text_res.get("confidence", 0.5)
-                    
-                    scores.append(score)
-                    labels.append("Text (Manual)")
-                    modalities_used.append("text")
-                    confidence_scores.append(confidence)
-                    
-                    logger.info(f"Text score: {score}, confidence: {confidence}")
-                else:
-                    logger.warning("Text analysis failed or returned an error")
+            # Audio contribution
+            if audio_results and hasattr(self, 'audio_score'):
+                scores.append(self.audio_score)
+                confidences.append(self.audio_confidence)
+                modalities.append('audio')
             
-            # Calculate combined score from all available modalities
-            if not scores:
-                logger.warning("No successful analysis from any modality")
-                html_result = f"<div style='text-align: center; padding: 20px;'>"
-                html_result += f"<h2>Analysis Failed</h2>"
-                html_result += f"<p>No results could be obtained from the provided inputs.</p>"
-                html_result += f"<p>Please ensure that your video, audio, or text contains valid content for sentiment analysis.</p>"
-                html_result += f"</div>"
-                return html_result, 0, None
+            # Text contribution
+            if text_results and hasattr(self, 'text_score'):
+                scores.append(self.text_score)
+                confidences.append(self.text_confidence)
+                modalities.append('text')
             
-            # Weight scores by confidence and modality importance
-            weighted_scores = []
-            total_weight = 0
-            
-            for i, score in enumerate(scores):
-                # Calculate a weighted importance based on both modality type and confidence
-                modality_type = modalities_used[i]
-                # Use modality_mapping to handle inconsistencies between 'visual' and 'video'
-                modality_key = modality_mapping.get(modality_type, modality_type)
-                modality_weight = weights.get(modality_key, 0.1)
-                confidence = confidence_scores[i]
+            # Ensure we have at least one valid score
+            if len(scores) > 0:
+                # For confidence weighted average, normalize confidences to sum to 1
+                confidence_sum = sum(confidences)
                 
-                # Ensure we don't have zero confidence
-                if confidence < 0.3:
-                    confidence = 0.3
-                
-                # Compute final weight
-                final_weight = modality_weight * confidence
-                
-                weighted_scores.append(score * final_weight)
-                total_weight += final_weight
-            
-            # Calculate final score
-            final_score = sum(weighted_scores) / total_weight if total_weight > 0 else 0
-            
-            # Convert score to sentiment category
-            sentiment = "Neutral"
-            if final_score >= 0.2:
-                sentiment = "Positive"
-            elif final_score <= -0.2:
-                sentiment = "Negative"
-            
-            # Create a visualization of the modality contributions
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-            
-            # Set a color for each sentiment range
-            colors = []
-            for score in scores:
-                if score >= 0.2:
-                    colors.append('#4CAF50')  # Green for positive
-                elif score <= -0.2:
-                    colors.append('#F44336')  # Red for negative
+                if confidence_sum > 0:
+                    # Weighted average of scores by confidence
+                    final_score = sum(s * c for s, c in zip(scores, confidences)) / confidence_sum
+                    final_confidence = confidence_sum / len(confidences)  # Average confidence
                 else:
-                    colors.append('#9E9E9E')  # Gray for neutral
+                    # Simple average if confidences are all zero
+                    final_score = sum(scores) / len(scores)
+                    final_confidence = 0.5  # Default confidence
+            else:
+                final_score = 0
+                final_confidence = 0
+        
+        # Final score should be between -1 and 1
+        final_score = max(-1.0, min(1.0, final_score))
+        
+        # Record processing time
+        processing_time = time.time() - start_time
+        logger.info(f"Multimodal processing completed in {processing_time:.2f} seconds")
+        
+        # Clean up any temporary files
+        temp_files = []
+        if hasattr(self, 'temp_files'):
+            temp_files = self.temp_files
             
-            # Create bar chart showing score by modality
-            bars = ax1.bar(labels, scores, color=colors)
+        if temp_files:
+            logger.info(f"Cleaning up {len(temp_files)} temporary files")
+            for temp_file in temp_files:
+                try:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                except Exception as e:
+                    logger.warning(f"Error cleaning up temp file {temp_file}: {str(e)}")
+            self.temp_files = []
+        
+        # Generate result HTML, sentiment score, and chart
+        result_html = self._generate_result_html(visual_results, audio_results, text_results, transcript)
+        chart_output = self._generate_chart(scores, modalities, confidences, final_score)
+        
+        # Store the final score and confidence
+        self.overall_score = final_score
+        self.overall_confidence = final_confidence
+        
+        # Return the HTML, score, and chart
+        return result_html, final_score, chart_output
+
+    def _generate_result_html(self, visual_results, audio_results, text_results, transcript=None):
+        """
+        Generate HTML for sentiment analysis results
+        
+        Args:
+            visual_results: Visual sentiment analysis results
+            audio_results: Audio sentiment analysis results
+            text_results: Text sentiment analysis results
+            transcript: Speech transcription (optional)
             
-            # Add a horizontal line at y=0
-            ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-            
-            # Add horizontal lines at sentiment thresholds
-            ax1.axhline(y=0.2, color='green', linestyle='--', alpha=0.5, label='Positive Threshold')
-            ax1.axhline(y=-0.2, color='red', linestyle='--', alpha=0.5, label='Negative Threshold')
-            
-            # Add labels
-            ax1.set_title('Sentiment Scores by Modality')
-            ax1.set_ylabel('Sentiment Score (-1 to +1)')
-            ax1.set_ylim(-1.1, 1.1)
-            
-            # Add score labels on top of bars
-            for bar in bars:
-                height = bar.get_height()
-                if height < 0:
-                    # For negative scores, put the label below the bar
-                    ax1.text(bar.get_x() + bar.get_width()/2., height - 0.1,
-                            f'{height:.2f}', ha='center', va='top')
-                else:
-                    # For positive or zero scores, put the label on top
-                    ax1.text(bar.get_x() + bar.get_width()/2., height + 0.05,
-                            f'{height:.2f}', ha='center', va='bottom')
-            
-            ax1.legend()
-            
-            # Create a pie chart showing the contribution of each modality to the final score
-            # Calculate the absolute contribution of each modality
-            contributions = []
-            labels_pie = []
-            
-            for i, (label, score) in enumerate(zip(labels, scores)):
-                modality_type = modalities_used[i]
-                # Use modality_mapping to handle inconsistencies between 'visual' and 'video'
-                modality_key = modality_mapping.get(modality_type, modality_type)
-                modality_weight = weights.get(modality_key, 0.1)
-                confidence = confidence_scores[i]
-                final_weight = modality_weight * confidence
-                weight_proportion = final_weight / total_weight if total_weight > 0 else 0
-                
-                # Only include modalities with positive contributions to avoid confusion
-                contribution = abs(score * weight_proportion)
-                if contribution > 0.01:  # Only include significant contributions
-                    contributions.append(contribution)
-                    labels_pie.append(f"{label}\n({weight_proportion:.2f})")
-            
-            if contributions:
-                ax2.pie(contributions, labels=labels_pie, autopct='%1.1f%%', startangle=90,
-                       shadow=False, colors=['#2196F3', '#FF9800', '#9C27B0'][:len(contributions)])
-                ax2.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle
-                ax2.set_title('Modality Contribution to Final Analysis')
-            
-            plt.tight_layout()
-            
-            # Create a professional HTML result with academic styling
-            html_result = f"""
-            <div style='font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f9f9f9; border-radius: 8px;'>
-                <h2 style='color: #234A8B; text-align: center; margin-bottom: 20px; font-size: 24px;'>Multimodal Sentiment Analysis Results</h2>
-                
-                <div style='background-color: #fff; padding: 15px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>
-                    <h3 style='color: #333; margin-top: 0; font-size: 20px;'>Analysis Summary</h3>
-                    <table style='width: 100%; border-collapse: collapse; margin-bottom: 10px; font-size: 16px;'>
-                        <tr>
-                            <td style='padding: 8px; font-weight: bold; width: 40%; color: #000;'>Sentiment Classification:</td>
-                            <td style='padding: 8px; color: #000;'>{sentiment}</td>
-                        </tr>
-                        <tr>
-                            <td style='padding: 8px; font-weight: bold; color: #000;'>Sentiment Score:</td>
-                            <td style='padding: 8px; color: #000;'>{final_score:.2f} (Range: -1 to 1)</td>
-                        </tr>
-                        <tr>
-                            <td style='padding: 8px; font-weight: bold; color: #000;'>Confidence Level:</td>
-                            <td style='padding: 8px; color: #000;'>{(sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0):.2f}</td>
-                        </tr>
-                        <tr>
-                            <td style='padding: 8px; font-weight: bold; color: #000;'>Modalities Analyzed:</td>
-                            <td style='padding: 8px; color: #000;'>{", ".join([m.capitalize() for m in set(modalities_used)])}</td>
-                        </tr>
-                    </table>
-                </div>
+        Returns:
+            str: HTML for displaying results
+        """
+        html_parts = []
+        
+        # Function to create a nice result table
+        def create_result_table(title, rows):
+            table_html = f"""
+            <div style="margin-bottom: 20px;">
+                <h2>{title}</h2>
+                <div style="height: 2px; background: linear-gradient(90deg, #3a7bd5, #00d2ff); margin-bottom: 15px;"></div>
+                <table style="width: 100%; border-collapse: collapse;">
             """
             
-            # Display transcribed text in a prominent position if available
-            if "transcribed_text" in results and results["transcribed_text"]:
-                html_result += f"""
-                <div style='background-color: #E1EFFE; padding: 15px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border-left: 4px solid #0D47A1;'>
-                    <h3 style='color: #0D47A1; margin-top: 0; font-size: 18px;'>Automatically Transcribed Speech</h3>
-                    <blockquote style='margin: 0; font-style: italic; color: #000; font-size: 16px;'>"{results['transcribed_text']}"</blockquote>
-                </div>
+            for label, value in rows:
+                table_html += f"""
+                    <tr>
+                        <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: bold; width: 50%;">{label}:</td>
+                        <td style="padding: 8px; border-bottom: 1px solid #eee;">{value}</td>
+                    </tr>
                 """
             
-            # Create detailed result sections for each modality
-            html_result += "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 20px;'>"
-            
-            # Visual Analysis Section
-            if "video" in results and "visual" in results["video"] and results["video"]["visual"]:
-                visual_res = results["video"]["visual"]
-                visual_score = visual_res.get("sentiment_score", 0)
-                dominant_emotion = visual_res.get("dominant_emotion", "Unknown")
-                emotion_conf = visual_res.get("dominant_emotion_confidence", 0)
-                
-                html_result += f"""
-                <div style='background-color: #fff; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>
-                    <h4 style='color: #333; margin-top: 0; border-bottom: 1px solid #ccc; padding-bottom: 8px; font-size: 18px;'>Visual Analysis</h4>
-                    <table style='width: 100%; border-collapse: collapse; font-size: 16px;'>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Sentiment Score:</td>
-                            <td style='padding: 6px; color: #000;'>{visual_score:.2f}</td>
-                        </tr>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Dominant Expression:</td>
-                            <td style='padding: 6px; color: #000;'>{dominant_emotion}</td>
-                        </tr>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Confidence:</td>
-                            <td style='padding: 6px; color: #000;'>{emotion_conf:.2f}</td>
-                        </tr>
-                    </table>
-                </div>
-                """
-            
-            # Audio Analysis Section
-            if "video" in results and "audio" in results["video"] and results["video"]["audio"]:
-                audio_res = results["video"]["audio"]
-                audio_score = audio_res.get("sentiment_score", 0)
-                emotion = audio_res.get("emotion", "Unknown")
-                confidence = audio_res.get("confidence", 0)
-                
-                html_result += f"""
-                <div style='background-color: #fff; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>
-                    <h4 style='color: #333; margin-top: 0; border-bottom: 1px solid #ccc; padding-bottom: 8px; font-size: 18px;'>Audio Analysis</h4>
-                    <table style='width: 100%; border-collapse: collapse; font-size: 16px;'>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Sentiment Score:</td>
-                            <td style='padding: 6px; color: #000;'>{audio_score:.2f}</td>
-                        </tr>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Detected Emotion:</td>
-                            <td style='padding: 6px; color: #000;'>{emotion}</td>
-                        </tr>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Confidence:</td>
-                            <td style='padding: 6px; color: #000;'>{confidence:.2f}</td>
-                        </tr>
-                    </table>
-                </div>
-                """
-            
-            # Text Analysis Section
-            if "video" in results and "text" in results["video"] and results["video"]["text"]:
-                text_res = results["video"]["text"]
-                text_score = text_res.get("sentiment_score", 0)
-                sentiment = text_res.get("sentiment", "Unknown")
-                confidence = text_res.get("confidence", 0)
-                
-                html_result += f"""
-                <div style='background-color: #fff; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>
-                    <h4 style='color: #333; margin-top: 0; border-bottom: 1px solid #ccc; padding-bottom: 8px; font-size: 18px;'>Text Analysis</h4>
-                    <table style='width: 100%; border-collapse: collapse; font-size: 16px;'>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Sentiment Score:</td>
-                            <td style='padding: 6px; color: #000;'>{text_score:.2f}</td>
-                        </tr>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Classification:</td>
-                            <td style='padding: 6px; color: #000;'>{sentiment}</td>
-                        </tr>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Confidence:</td>
-                            <td style='padding: 6px; color: #000;'>{confidence:.2f}</td>
-                        </tr>
-                    </table>
-                </div>
-                """
-            elif "text" in results:
-                # For manually entered text
-                text_res = results["text"]
-                text_score = text_res.get("sentiment_score", 0)
-                sentiment = text_res.get("sentiment", "Unknown")
-                confidence = text_res.get("confidence", 0)
-                
-                html_result += f"""
-                <div style='background-color: #fff; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>
-                    <h4 style='color: #333; margin-top: 0; border-bottom: 1px solid #ccc; padding-bottom: 8px; font-size: 18px;'>Text Analysis</h4>
-                    <table style='width: 100%; border-collapse: collapse; font-size: 16px;'>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Sentiment Score:</td>
-                            <td style='padding: 6px; color: #000;'>{text_score:.2f}</td>
-                        </tr>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Classification:</td>
-                            <td style='padding: 6px; color: #000;'>{sentiment}</td>
-                        </tr>
-                        <tr>
-                            <td style='padding: 6px; font-weight: bold; color: #000;'>Confidence:</td>
-                            <td style='padding: 6px; color: #000;'>{confidence:.2f}</td>
-                        </tr>
-                    </table>
-                </div>
-                """
-            
-            html_result += "</div>"  # End of modality grid
-            
-            # Add multimodal fusion details
-            if len(modalities_used) > 1:
-                html_result += f"""
-                <div style='background-color: #F5F5F5; padding: 15px; border-radius: 5px; margin-top: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: 1px solid #DDD;'>
-                    <h3 style='color: #333; margin-top: 0; font-size: 18px;'>Multimodal Fusion Methodology</h3>
-                    <p style='margin-top: 0; font-size: 16px; color: #000;'>This analysis employs a confidence-weighted multimodal fusion approach that combines evidence from multiple modalities:</p>
-                    
-                    <table style='width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 15px;'>
-                        <tr style='background-color: #E0E0E0;'>
-                            <th style='padding: 8px; text-align: left; border-bottom: 1px solid #999; color: #000;'>Modality</th>
-                            <th style='padding: 8px; text-align: right; border-bottom: 1px solid #999; color: #000;'>Base Weight</th>
-                            <th style='padding: 8px; text-align: right; border-bottom: 1px solid #999; color: #000;'>Confidence</th>
-                            <th style='padding: 8px; text-align: right; border-bottom: 1px solid #999; color: #000;'>Final Weight</th>
-                            <th style='padding: 8px; text-align: right; border-bottom: 1px solid #999; color: #000;'>Score</th>
-                            <th style='padding: 8px; text-align: right; border-bottom: 1px solid #999; color: #000;'>Contribution</th>
-                        </tr>
-                """
-                
-                for i, (modality, score) in enumerate(zip(labels, scores)):
-                    modality_type = modalities_used[i]
-                    # Use modality_mapping to handle inconsistencies between 'visual' and 'video'
-                    modality_key = modality_mapping.get(modality_type, modality_type)
-                    modality_weight = weights.get(modality_key, 0.1)
-                    confidence = confidence_scores[i]
-                    final_weight = modality_weight * confidence
-                    weight_proportion = final_weight / total_weight if total_weight > 0 else 0
-                    contribution = score * weight_proportion
-                    
-                    html_result += f"""
-                        <tr>
-                            <td style='padding: 8px; border-bottom: 1px solid #ccc; color: #000;'>{modality}</td>
-                            <td style='padding: 8px; text-align: right; border-bottom: 1px solid #ccc; color: #000;'>{modality_weight:.2f}</td>
-                            <td style='padding: 8px; text-align: right; border-bottom: 1px solid #ccc; color: #000;'>{confidence:.2f}</td>
-                            <td style='padding: 8px; text-align: right; border-bottom: 1px solid #ccc; color: #000;'>{weight_proportion:.2f}</td>
-                            <td style='padding: 8px; text-align: right; border-bottom: 1px solid #ccc; color: #000;'>{score:.2f}</td>
-                            <td style='padding: 8px; text-align: right; border-bottom: 1px solid #ccc; color: #000;'>{contribution:.2f}</td>
-                        </tr>
-                    """
-                
-                html_result += f"""
-                        <tr style='font-weight: bold;'>
-                            <td style='padding: 8px; border-bottom: 1px solid #ccc; color: #000;'>Final Result</td>
-                            <td style='padding: 8px; text-align: right; border-bottom: 1px solid #ccc; color: #000;'>-</td>
-                            <td style='padding: 8px; text-align: right; border-bottom: 1px solid #ccc; color: #000;'>-</td>
-                            <td style='padding: 8px; text-align: right; border-bottom: 1px solid #ccc; color: #000;'>1.00</td>
-                            <td style='padding: 8px; text-align: right; border-bottom: 1px solid #ccc; color: #000;'>{final_score:.2f}</td>
-                            <td style='padding: 8px; text-align: right; border-bottom: 1px solid #ccc; color: #000;'>{final_score:.2f}</td>
-                        </tr>
-                    </table>
-                </div>
-                """
-            
-            # Add model information
-            html_result += f"""
-            <div style='background-color: #EEFBEE; padding: 15px; border-radius: 5px; margin-top: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: 1px solid #CCC;'>
-                <h3 style='color: #333; margin-top: 0; font-size: 18px;'>Model Information</h3>
-                <p style='margin-top: 0; color: #000; font-size: 16px;'>This system utilizes multiple specialized models for sentiment analysis:</p>
-                <ul style='margin-top: 5px; color: #000; font-size: 16px;'>
-                    <li><strong>Visual Analysis:</strong> DeepFace facial expression recognition with emotion mapping</li>
-                    <li><strong>Audio Analysis:</strong> CNN model trained on the RAVDESS emotional speech dataset</li>
-                    <li><strong>Text Analysis:</strong> Transformer-based sentiment classification model</li>
-                    <li><strong>Speech Recognition:</strong> OpenAI Whisper model with Google Speech Recognition fallback</li>
-                </ul>
+            table_html += """
+                </table>
             </div>
             """
-            
-            html_result += f"</div>"  # End of main container
-            
-            # Round the score to 2 decimal places for display in the UI
-            final_score_rounded = round(final_score, 2)
-            
-            # Clean up any temporary files
-            if self.cleanup_temp:
-                self._cleanup_temp_files()
+            return table_html
+        
+        # Visual results
+        if visual_results:
+            try:
+                # Format the dominant expression with capital first letter
+                dominant_expression = visual_results.get('dominant_emotion', 'unknown')
+                if dominant_expression:
+                    dominant_expression = dominant_expression[0].upper() + dominant_expression[1:]
                 
-            return html_result, final_score_rounded, fig
+                rows = [
+                    ("Sentiment Score", f"{self.visual_score:.2f}"),
+                    ("Dominant Expression", dominant_expression),
+                    ("Confidence", f"{self.visual_confidence:.2f}")
+                ]
+                html_parts.append(create_result_table("Visual Analysis", rows))
+            except Exception as e:
+                logger.error(f"Error formatting visual results: {str(e)}")
+                html_parts.append(f"<p>Error formatting visual results: {str(e)}</p>")
+        
+        # Audio results
+        if audio_results:
+            try:
+                rows = [
+                    ("Sentiment Score", f"{self.audio_score:.2f}"),
+                    ("Detected Emotion", audio_results.get('emotion', 'unknown')),
+                    ("Confidence", f"{self.audio_confidence:.2f}")
+                ]
+                html_parts.append(create_result_table("Audio Analysis", rows))
+            except Exception as e:
+                logger.error(f"Error formatting audio results: {str(e)}")
+                html_parts.append(f"<p>Error formatting audio results: {str(e)}</p>")
+        else:
+            # Check if we have audio score and confidence attributes, but audio_results failed
+            if hasattr(self, 'audio_score') and hasattr(self, 'audio_confidence'):
+                try:
+                    # Use fallback values when audio_results is not available but we have scores
+                    rows = [
+                        ("Sentiment Score", f"{self.audio_score:.2f}"),
+                        ("Detected Emotion", "unknown"),
+                        ("Confidence", f"{self.audio_confidence:.2f}")
+                    ]
+                    html_parts.append(create_result_table("Audio Analysis", rows))
+                except Exception as e:
+                    logger.error(f"Error formatting fallback audio results: {str(e)}")
+        
+        # Text results
+        if text_results:
+            try:
+                # Check if text_results has the expected structure
+                if isinstance(text_results, dict) and ('classification' in text_results or 'sentiment' in text_results):
+                    # Extract values with appropriate fallbacks
+                    classification = text_results.get('classification', text_results.get('sentiment', 'neutral'))
+                    if isinstance(classification, str):
+                        classification = classification.capitalize()
+                    
+                    sentiment_score = text_results.get('sentiment_score', 0)
+                    confidence = text_results.get('confidence', 0.5)
+                    
+                    rows = [
+                        ("Sentiment Score", f"{sentiment_score:.2f}"),
+                        ("Classification", classification),
+                        ("Confidence", f"{confidence:.2f}")
+                    ]
+                    html_parts.append(create_result_table("Text Analysis", rows))
+                else:
+                    # Fallback when text_results structure is unexpected
+                    logger.warning(f"Unexpected text_results structure: {text_results}")
+                    # Use stored values if available
+                    if hasattr(self, 'text_score') and hasattr(self, 'text_confidence'):
+                        sentiment = self._score_to_sentiment(self.text_score).capitalize()
+                        rows = [
+                            ("Sentiment Score", f"{self.text_score:.2f}"),
+                            ("Classification", sentiment),
+                            ("Confidence", f"{self.text_confidence:.2f}")
+                        ]
+                        html_parts.append(create_result_table("Text Analysis", rows))
+            except Exception as e:
+                logger.error(f"Error formatting text results: {str(e)}")
+                html_parts.append(f"<p>Error formatting text results: {str(e)}</p>")
+        
+        # Add transcript if available
+        if transcript:
+            html_parts.append(f"""
+            <div style="margin-bottom: 20px;">
+                <h2>Speech Transcript</h2>
+                <div style="height: 2px; background: linear-gradient(90deg, #3a7bd5, #00d2ff); margin-bottom: 15px;"></div>
+                <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; font-style: italic;">"{transcript}"</div>
+            </div>
+            """)
+        
+        # Join all parts
+        return "".join(html_parts)
+
+    def _get_path_from_input(self, input_data):
+        """
+        Extract a file path from different types of input data
+        
+        Args:
+            input_data: Input data (path string, file object, gradio file input)
+            
+        Returns:
+            str: File path or None if not found
+        """
+        try:
+            # Handle string paths
+            if isinstance(input_data, str):
+                return input_data
+                
+            # Handle dict-like objects (like gradio inputs)
+            if isinstance(input_data, dict) and 'path' in input_data:
+                return input_data['path']
+                
+            # Handle file-like objects
+            if hasattr(input_data, 'name'):
+                return input_data.name
+                
+            # Handle tuple from Gradio components
+            if isinstance(input_data, tuple) and len(input_data) == 2:
+                # Could be (sample_rate, audio_data) from Gradio Audio
+                return None  # No path for raw audio data
+                
+            logger.warning(f"Couldn't extract path from input: {type(input_data)}")
+            return None
             
         except Exception as e:
-            logger.error(f"Error in multimodal processing: {str(e)}", exc_info=True)
+            logger.error(f"Error extracting path from input: {str(e)}")
+            return None
+
+    def _transcribe_video(self, video_path):
+        """
+        Wrapper method for transcribe_video to maintain consistency with other methods
+        
+        Args:
+            video_path: Path to video file
             
-            html_result = f"<div style='text-align: center; padding: 20px;'>"
-            html_result += f"<h2>Error in Multimodal Analysis</h2>"
-            html_result += f"<p>{str(e)}</p>"
-            html_result += f"</div>"
+        Returns:
+            str: Transcribed text
+        """
+        return self.transcribe_video(video_path)
+
+    def _generate_chart(self, scores, modalities, confidences, final_score):
+        """
+        Generate a chart showing sentiment scores across modalities
+        
+        Args:
+            scores: List of sentiment scores for each modality
+            modalities: List of modality names
+            confidences: List of confidence values
+            final_score: Final combined sentiment score
             
-            return html_result, 0, None
+        Returns:
+            matplotlib.Figure: Chart figure
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            # Create figure and axis
+            fig, ax = plt.subplots(figsize=(8, 5))
+            
+            # If we don't have any scores, return empty chart
+            if not scores or not modalities:
+                ax.text(0.5, 0.5, "No sentiment data available", 
+                       horizontalalignment='center', verticalalignment='center',
+                       transform=ax.transAxes, fontsize=14)
+                ax.set_axis_off()
+                return fig
+            
+            # Create x-positions for bars
+            x_pos = np.arange(len(modalities))
+            
+            # Define colors based on sentiment (red for negative, green for positive)
+            colors = ['#ff6b6b' if s < 0 else '#4ecdc4' for s in scores]
+            
+            # Create bars
+            bars = ax.bar(x_pos, scores, align='center', alpha=0.7, color=colors, width=0.5)
+            
+            # Add confidence as text on bars
+            for i, (bar, conf) in enumerate(zip(bars, confidences)):
+                height = bar.get_height()
+                if height < 0:
+                    # For negative bars, show confidence above the x-axis
+                    y_pos = 0.05
+                else:
+                    # For positive bars, show confidence above the bar
+                    y_pos = height + 0.05
+                
+                ax.text(bar.get_x() + bar.get_width()/2, y_pos, 
+                        f'{conf:.2f}', ha='center', va='bottom', fontsize=9,
+                        bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.2'))
+            
+            # Add a horizontal line at y=0
+            ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+            
+            # Add final score as a star marker
+            ax.scatter(len(modalities), final_score, marker='*', s=200, 
+                      color='#f9c80e', edgecolor='black', zorder=10,
+                      label='Overall Score')
+            
+            # Set chart properties
+            ax.set_ylabel('Sentiment Score')
+            ax.set_title('Sentiment Analysis by Modality')
+            ax.set_xticks(list(x_pos) + [len(modalities)])
+            ax.set_xticklabels(modalities + ['Combined'])
+            ax.set_ylim(-1.1, 1.1)
+            
+            # Add grid for better readability
+            ax.grid(True, axis='y', linestyle='--', alpha=0.3)
+            
+            # Add sentiment regions
+            ax.axhspan(0.2, 1.1, facecolor='#4ecdc4', alpha=0.1, label='Positive')
+            ax.axhspan(-0.2, 0.2, facecolor='#f9c80e', alpha=0.1, label='Neutral')
+            ax.axhspan(-1.1, -0.2, facecolor='#ff6b6b', alpha=0.1, label='Negative')
+            
+            # Add legend
+            ax.legend(loc='best')
+            
+            # Tight layout
+            plt.tight_layout()
+            
+            return fig
+        
+        except Exception as e:
+            logger.error(f"Error generating chart: {str(e)}", exc_info=True)
+            # Create a simple error figure
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.text(0.5, 0.5, f"Error generating chart: {str(e)}", 
+                   horizontalalignment='center', verticalalignment='center',
+                   transform=ax.transAxes, fontsize=10, wrap=True)
+            ax.set_axis_off()
+            return fig
 
 def main():
     import argparse
