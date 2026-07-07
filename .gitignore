@@ -1,11 +1,9 @@
-# Model files (large)
-models/*.h5
-models/*.hdf5
-models/*.pb
-models/*.json
-models/*.bin
+# Model files. The two shipped models (models/audio_sentiment_model_notebook.h5
+# and models/audio_norm_params.json) are versioned with Git LFS and are NOT
+# ignored. Only ignore additional/experimental model artefacts here.
 models/weights/
 models/checkpoints/
+models/*.bin
 
 # Results and temp directories
 results/

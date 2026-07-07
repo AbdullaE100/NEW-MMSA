@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 
 """
-Optimized MMSA Gradio Interface with SHAP
-Includes SHAP visualizations with improved loading performance
+MMSA Gradio interface with per-modality feature-contribution charts.
+
+This is the primary entry point. It wraps ``MultimodalSentimentGradio`` and
+adds bar charts that decompose each modality's sentiment score into its
+per-emotion contributions. These are weighted feature-contribution charts, not
+SHAP (Shapley) values; see the note near ``MultimodalSentimentWithSHAP``.
 """
 
 import os
@@ -55,15 +59,20 @@ except ImportError:
         logger.error("Could not import MMSA modules. Make sure they exist.")
         sys.exit(1)
 
-# Check for SHAP library
-try:
-    import shap
-    SHAP_AVAILABLE = True
-except ImportError:
-    SHAP_AVAILABLE = False
-    logger.warning("SHAP library not available. SHAP visualizations will be disabled.")
+# ---------------------------------------------------------------------------
+# A note on "explanations" in this module
+# ---------------------------------------------------------------------------
+# The charts produced here are FEATURE-CONTRIBUTION charts: horizontal bar
+# charts of each emotion/label probability scaled by its mapped sentiment
+# weight. They are NOT SHAP (SHapley Additive exPlanations) values — no
+# coalitional game is solved and the `shap` library is not used. The class and
+# method names retain the historical "shap" spelling for backwards
+# compatibility, but every user-facing label describes them accurately as
+# "feature contribution" charts. Wiring up genuine SHAP explainers is tracked
+# as a roadmap item in the README.
+# ---------------------------------------------------------------------------
 
-# Default paths for SHAP visualization results
+# Default output directories for the feature-contribution charts
 DEFAULT_SHAP_PATHS = {
     'text': 'shap_results_text',
     'audio': 'shap_results_audio',
@@ -73,7 +82,11 @@ DEFAULT_SHAP_PATHS = {
 
 class MultimodalSentimentWithSHAP:
     """
-    Extended Gradio interface that includes SHAP explanations
+    Gradio interface that adds per-modality feature-contribution charts on top
+    of :class:`MultimodalSentimentGradio`.
+
+    Note: these charts are weighted feature-contribution bar charts, not SHAP
+    (Shapley) values. See the module-level note above.
     """
     
     def __init__(self, 
@@ -120,14 +133,8 @@ class MultimodalSentimentWithSHAP:
             allow_fallback=allow_fallback
         )
         
-        # SHAP-specific attributes
+        # Output directory for the generated feature-contribution charts
         self.shap_results_dir = shap_results_dir or '.'
-        self.shap_available = SHAP_AVAILABLE
-        
-        if not self.shap_available:
-            logger.warning("SHAP library not available. SHAP visualizations will be disabled.")
-        else:
-            logger.info("SHAP library available. SHAP visualizations enabled.")
         
         # Create a dictionary of SHAP visualization paths
         self.shap_paths = {}
@@ -216,8 +223,8 @@ class MultimodalSentimentWithSHAP:
         # Add both the data element and the direct display HTML to the front of the result
         result_html = data_element + direct_results_html + result_html
         
-        # Generate SHAP visualizations if data is available
-        if self.shap_available and video_input:
+        # Generate feature-contribution charts if data is available
+        if video_input:
             session_id = str(uuid.uuid4())[:8]
             
             # Check if video_input is a dict or has the expected structure
@@ -237,35 +244,9 @@ class MultimodalSentimentWithSHAP:
                 # Continue without generating SHAP visualizations
             
         return result_html, sentiment_score, chart_output
-    
-    def analyze_text(self, text_input):
-        """Analyze text sentiment using the MMSA instance"""
-        # Get the analysis results
-        result = self.mmsa_instance.analyze_text(text_input)
-        
-        # Generate SHAP visualizations for the text
-        if self.shap_available and text_input:
-            session_id = str(uuid.uuid4())[:8]
-            self.current_analysis['text_transcript'] = text_input
-            self._generate_text_shap(session_id)
-            
-        return result
-    
-    def analyze_audio(self, audio_input):
-        """Analyze audio sentiment using the MMSA instance"""
-        # Get the analysis results
-        result = self.mmsa_instance.analyze_audio(audio_input)
-        
-        # Generate SHAP visualizations for the audio
-        if self.shap_available and audio_input:
-            session_id = str(uuid.uuid4())[:8]
-            self.current_analysis['audio_path'] = audio_input
-            self._generate_audio_shap(session_id)
-            
-        return result
-    
+
     def _generate_shap_visualizations(self, session_id):
-        """Generate SHAP visualizations for all modalities"""
+        """Generate the per-modality feature-contribution charts."""
         try:
             # Generate SHAP visualizations for visual sentiment
             self._generate_visual_shap(session_id)
@@ -354,7 +335,7 @@ class MultimodalSentimentWithSHAP:
                 # Create bar chart
                 plt.barh(emotions, values, color=colors)
                 plt.xlabel('Contribution to Visual Sentiment')
-                plt.title('Visual Emotion SHAP Analysis')
+                plt.title('Visual Emotion Contributions')
                 plt.tight_layout()
                 
                 # Save the visualization
@@ -442,7 +423,7 @@ class MultimodalSentimentWithSHAP:
                 # Create bar chart
                 plt.barh(emotions, values, color=colors)
                 plt.xlabel('Contribution to Audio Sentiment')
-                plt.title('Audio Emotion SHAP Analysis')
+                plt.title('Audio Emotion Contributions')
                 plt.tight_layout()
                 
                 # Save the visualization
@@ -548,7 +529,7 @@ class MultimodalSentimentWithSHAP:
             plt.xlabel('Contribution to Text Sentiment')
             
             # Add truncated transcript to title if available
-            title_text = "Text Sentiment SHAP Analysis"
+            title_text = "Text Sentiment Contributions"
             if text_transcript:
                 truncated_transcript = text_transcript[:30] + "..." if len(text_transcript) > 30 else text_transcript
                 title_text += f"\n\"{truncated_transcript}\""
@@ -602,7 +583,7 @@ class MultimodalSentimentWithSHAP:
                 # Create bar chart
                 plt.barh(labels, values, color=colors)
                 plt.xlabel('Contribution to Overall Sentiment')
-                plt.title('Multimodal Sentiment Analysis (SHAP)')
+                plt.title('Multimodal Feature Contributions')
                 plt.tight_layout()
                 
                 # Save the visualization
@@ -687,500 +668,6 @@ class MultimodalSentimentWithSHAP:
             # Create a placeholder on error
             return self._get_placeholder_image(modality)
     
-    def _generate_realtime_shap_visualization(self, modality):
-        """Generate a realtime SHAP visualization using actual data from the current analysis"""
-        try:
-            output_dir = self.shap_paths.get(modality)
-            if not output_dir:
-                return self._get_placeholder_image(modality)
-                
-            plt.figure(figsize=(10, 6))
-            
-            # Create visualization using actual data instead of hardcoded values
-            if modality == "visual" and hasattr(self.mmsa_instance, 'visual_analyzer'):
-                # Use actual emotion data from the visual analyzer
-                if hasattr(self.mmsa_instance.visual_analyzer, 'emotion_data'):
-                    emotions = self.mmsa_instance.visual_analyzer.emotion_data
-                    features = list(emotions.keys())
-                    values = [self.mmsa_instance.visual_analyzer.emotion_weights.get(emotion, 0) * value 
-                             for emotion, value in emotions.items()]
-                    title = "Visual Sentiment Analysis (Real-time)"
-                else:
-                    return self._get_placeholder_image(modality)
-                    
-            elif modality == "audio" and hasattr(self.mmsa_instance, 'audio_analyzer'):
-                # Use actual emotion data from audio analyzer
-                if hasattr(self.mmsa_instance.audio_analyzer, 'last_prediction') and self.mmsa_instance.audio_analyzer.last_prediction:
-                    emotions = self.mmsa_instance.audio_analyzer.last_prediction.get('all_emotions', {})
-                    features = list(emotions.keys())
-                    values = [self.mmsa_instance.audio_analyzer.emotion_weights.get(emotion, 0) * value 
-                             for emotion, value in emotions.items()]
-                    title = "Audio Sentiment Analysis (Real-time)"
-                else:
-                    return self._get_placeholder_image(modality)
-                    
-            elif modality == "text" and hasattr(self.mmsa_instance, 'text_analyzer'):
-                # Use actual sentiment data from text analyzer
-                if hasattr(self.mmsa_instance, 'text_score') and hasattr(self.mmsa_instance, 'text_confidence'):
-                    # For simple sentiment models, we might just have positive/negative
-                    features = ['Positive', 'Negative', 'Neutral']
-                    if self.mmsa_instance.text_score > 0:
-                        values = [self.mmsa_instance.text_score, 0, 0]
-                    elif self.mmsa_instance.text_score < 0:
-                        values = [0, abs(self.mmsa_instance.text_score), 0]
-                    else:
-                        values = [0, 0, 1]
-                    title = "Text Sentiment Analysis (Real-time)"
-                else:
-                    return self._get_placeholder_image(modality)
-                    
-            else:  # all - combined modalities
-                features = []
-                values = []
-                
-                if hasattr(self.mmsa_instance, 'visual_score'):
-                    features.append('Visual')
-                    values.append(self.mmsa_instance.visual_score)
-                    
-                if hasattr(self.mmsa_instance, 'audio_score'):
-                    features.append('Audio')
-                    values.append(self.mmsa_instance.audio_score)
-                    
-                if hasattr(self.mmsa_instance, 'text_score'):
-                    features.append('Text')
-                    values.append(self.mmsa_instance.text_score)
-                    
-                if not features:
-                    return self._get_placeholder_image(modality)
-                    
-                title = "Multimodal Sentiment Analysis (Real-time)"
-                
-            # Sort by absolute contribution
-            paired_data = list(zip(features, values))
-            paired_data.sort(key=lambda x: abs(x[1]), reverse=True)
-            features = [item[0] for item in paired_data]
-            values = [item[1] for item in paired_data]
-                
-            # Create colormap - red for positive, blue for negative
-            colors = ['red' if v > 0 else 'blue' for v in values]
-            
-            # Create bar chart
-            plt.barh(features, values, color=colors)
-            plt.xlabel('Contribution to Sentiment')
-            plt.title(title)
-            plt.tight_layout()
-            
-            # Save the visualization
-            timestamp = int(time.time())
-            output_path = os.path.join(output_dir, f"realtime_shap_{modality}_{timestamp}.png")
-            plt.savefig(output_path)
-            plt.close()
-            
-            logger.info(f"Created real-time SHAP visualization for {modality} at {output_path}")
-            return [output_path]
-        except Exception as e:
-            logger.error(f"Error creating real-time visualization: {str(e)}", exc_info=True)
-            return self._get_placeholder_image(modality)
-    
-    def _create_sample_visualization(self, modality):
-        """Create a real-time SHAP visualization for the given modality using actual analysis data"""
-        try:
-            output_dir = self.shap_paths.get(modality)
-            if not output_dir:
-                return
-                
-            plt.figure(figsize=(10, 6))
-            
-            # Create visualization using actual data instead of hardcoded values
-            if modality == "visual" and hasattr(self.mmsa_instance, 'visual_analyzer'):
-                # Use actual emotion data from the visual analyzer
-                if hasattr(self.mmsa_instance.visual_analyzer, 'emotion_data'):
-                    emotions = self.mmsa_instance.visual_analyzer.emotion_data
-                    features = list(emotions.keys())
-                    values = [self.mmsa_instance.visual_analyzer.emotion_weights.get(emotion, 0) * value 
-                             for emotion, value in emotions.items()]
-                    title = "Visual Sentiment Analysis"
-                else:
-                    # Fallback to basic visual sentiment if emotion_data not available
-                    features = ['happy', 'surprise', 'neutral', 'sad', 'fear', 'disgust', 'angry']
-                    # Try to use the visual score to estimate values
-                    if hasattr(self.mmsa_instance, 'visual_score'):
-                        visual_score = self.mmsa_instance.visual_score
-                        if visual_score > 0.5:
-                            values = [0.8, 0.3, 0.1, 0, 0, 0, 0]  # Highly positive
-                        elif visual_score > 0:
-                            values = [0.4, 0.2, 0.3, 0, 0, 0, 0]  # Mildly positive
-                        elif visual_score < -0.5:
-                            values = [0, 0, 0, 0.5, 0.2, 0.3, 0.6]  # Highly negative
-                        elif visual_score < 0:
-                            values = [0, 0, 0.1, 0.3, 0.1, 0.2, 0.3]  # Mildly negative
-                        else:
-                            values = [0, 0, 0.8, 0, 0, 0, 0]  # Neutral
-                    else:
-                        values = [0.2, 0.1, 0.5, 0.1, 0.05, 0.05, 0.1]  # Balanced
-                    title = "Visual Sentiment Analysis"
-                    
-            elif modality == "audio" and hasattr(self.mmsa_instance, 'audio_analyzer'):
-                # Use actual emotion data from audio analyzer
-                if hasattr(self.mmsa_instance.audio_analyzer, 'last_prediction') and self.mmsa_instance.audio_analyzer.last_prediction:
-                    emotions = self.mmsa_instance.audio_analyzer.last_prediction.get('all_emotions', {})
-                    features = list(emotions.keys())
-                    values = [self.mmsa_instance.audio_analyzer.emotion_weights.get(emotion, 0) * value 
-                             for emotion, value in emotions.items()]
-                    title = "Audio Sentiment Analysis"
-                else:
-                    # Fallback to basic audio sentiment if last_prediction not available
-                    features = ['happy', 'surprised', 'calm', 'neutral', 'fearful', 'sad', 'disgust', 'angry']
-                    # Try to use the audio score to estimate values
-                    if hasattr(self.mmsa_instance, 'audio_score'):
-                        audio_score = self.mmsa_instance.audio_score
-                        if audio_score > 0.5:
-                            values = [0.7, 0.5, 0.3, 0.1, 0, 0, 0, 0]  # Highly positive
-                        elif audio_score > 0:
-                            values = [0.3, 0.2, 0.4, 0.3, 0, 0, 0, 0]  # Mildly positive
-                        elif audio_score < -0.5:
-                            values = [0, 0, 0, 0.1, 0.4, 0.5, 0.5, 0.6]  # Highly negative
-                        elif audio_score < 0:
-                            values = [0, 0, 0, 0.3, 0.2, 0.3, 0.2, 0.4]  # Mildly negative
-                        else:
-                            values = [0, 0, 0.2, 0.8, 0, 0, 0, 0]  # Neutral
-                    else:
-                        values = [0.1, 0.1, 0.2, 0.4, 0.05, 0.05, 0.05, 0.05]  # Balanced
-                    title = "Audio Sentiment Analysis"
-                    
-            elif modality == "text":
-                # Use actual sentiment data from text analyzer
-                if hasattr(self.mmsa_instance, 'text_score') and hasattr(self.mmsa_instance, 'text_confidence'):
-                    # For simple sentiment models, we might just have positive/negative
-                    features = ['Positive', 'Negative']
-                    if self.mmsa_instance.text_score > 0:
-                        values = [self.mmsa_instance.text_score, 0]
-                    elif self.mmsa_instance.text_score < 0:
-                        values = [0, abs(self.mmsa_instance.text_score)]
-                    else:
-                        values = [0.1, 0.1]  # Balanced neutral
-                    title = "Text Sentiment Analysis"
-                else:
-                    features = ['Positive', 'Negative']
-                    values = [0.3, 0.1]  # Default slightly positive
-                    title = "Text Sentiment Analysis"
-                    
-            else:  # all - combined modalities
-                features = []
-                values = []
-                
-                if hasattr(self.mmsa_instance, 'visual_score'):
-                    features.append('Visual')
-                    values.append(self.mmsa_instance.visual_score)
-                    
-                if hasattr(self.mmsa_instance, 'audio_score'):
-                    features.append('Audio')
-                    values.append(self.mmsa_instance.audio_score)
-                    
-                if hasattr(self.mmsa_instance, 'text_score'):
-                    features.append('Text')
-                    values.append(self.mmsa_instance.text_score)
-                    
-                if not features:
-                    # Default values if no modalities have been processed
-                    features = ['Visual', 'Audio', 'Text']
-                    # Use any available overall sentiment to estimate modality contributions
-                    if hasattr(self.mmsa_instance, 'overall_score'):
-                        score = self.mmsa_instance.overall_score
-                        if score > 0:
-                            values = [0.5, 0.3, 0.2]  # Positive overall
-                        elif score < 0:
-                            values = [-0.3, -0.5, -0.2]  # Negative overall
-                        else:
-                            values = [0.1, 0, -0.1]  # Neutral overall
-                    else:
-                        values = [0.3, 0.2, -0.1]  # Default varied sentiment
-                    
-                title = "Multimodal Sentiment Analysis"
-                
-            # Sort by absolute contribution
-            paired_data = list(zip(features, values))
-            paired_data.sort(key=lambda x: abs(x[1]), reverse=True)
-            features = [item[0] for item in paired_data]
-            values = [item[1] for item in paired_data]
-                
-            # Create colormap - red for positive, blue for negative
-            colors = ['red' if v > 0 else 'blue' for v in values]
-            
-            # Create bar chart
-            plt.barh(features, values, color=colors)
-            plt.xlabel('Contribution to Sentiment')
-            plt.title(title)
-            plt.tight_layout()
-            
-            # Save the visualization
-            output_path = os.path.join(output_dir, f"shap_{modality}_{int(time.time())}.png")
-            plt.savefig(output_path)
-            plt.close()
-            
-            # Add to current analysis
-            self.current_analysis['shap_images'][modality] = [output_path]
-            logger.info(f"Created real-time SHAP visualization for {modality} at {output_path}")
-            
-            return output_path
-        except Exception as e:
-            logger.error(f"Error creating real-time visualization: {str(e)}", exc_info=True)
-            return None
-    
-    def _get_placeholder_image(self, modality):
-        """Get or create a placeholder image when no visualizations are available"""
-        try:
-            output_dir = self.shap_paths.get(modality, self.shap_paths.get('all', '.'))
-            placeholder_path = os.path.join(output_dir, f"placeholder_{modality}.png")
-            
-            # Create placeholder image if it doesn't exist
-            if not os.path.exists(placeholder_path):
-                plt.figure(figsize=(10, 6))
-                plt.text(0.5, 0.5, f"No SHAP data available for {modality}\nAnalyze a video to generate visualizations",
-                        horizontalalignment='center', verticalalignment='center', fontsize=14)
-                plt.axis('off')
-                plt.savefig(placeholder_path)
-                plt.close()
-                
-            return [placeholder_path]
-        except Exception as e:
-            logger.error(f"Error creating placeholder: {str(e)}", exc_info=True)
-            # If all else fails, return empty list
-            return []
-    
-    def _generate_result_html(self, visual_results, audio_results, text_results, transcript=None):
-        """
-        Generate HTML for sentiment analysis results
-        
-        Args:
-            visual_results: Visual sentiment analysis results
-            audio_results: Audio sentiment analysis results
-            text_results: Text sentiment analysis results
-            transcript: Speech transcription (optional)
-            
-        Returns:
-            str: HTML for displaying results
-        """
-        html_parts = []
-        
-        # Function to create a nice result table
-        def create_result_table(title, rows):
-            table_html = f"""
-            <div style="margin-bottom: 20px;">
-                <h2>{title}</h2>
-                <div style="height: 3px; width: 50px; background: linear-gradient(90deg, #0066ff, #7c3aed); margin-bottom: 15px;"></div>
-                <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-            """
-            
-            for label, value in rows:
-                # Determine color based on sentiment labels
-                color = "#333333"
-                if label.lower() == "sentiment score" or "classification" in label.lower():
-                    if isinstance(value, (int, float)):
-                        if value > 0.15:
-                            color = "#10b981"  # green for positive
-                        elif value < -0.15:
-                            color = "#ef4444"  # red for negative
-                        else:
-                            color = "#f59e0b"  # amber for neutral
-                    elif isinstance(value, str):
-                        if value.lower() == "positive":
-                            color = "#10b981"
-                        elif value.lower() == "negative":
-                            color = "#ef4444"
-                        elif value.lower() == "neutral":
-                            color = "#f59e0b"
-                
-                # Format numeric values
-                if isinstance(value, float):
-                    value = f"{value:.2f}"
-                    
-                table_html += f"""
-                <tr style="border-bottom: 1px solid #eee;">
-                    <td style="padding: 12px 8px; font-weight: 600; width: 40%;">{label}:</td>
-                    <td style="padding: 12px 8px; color: {color}; font-weight: 500;">{value}</td>
-                </tr>
-                """
-            
-            table_html += """
-                </table>
-            </div>
-            """
-            
-            return table_html
-        
-        # Add overall sentiment result first - this is what matters most
-        overall_classification = ""
-        overall_score = 0
-        
-        # Calculate overall sentiment from modality scores
-        scores = []
-        confidences = []
-        
-        if visual_results and visual_results.get('sentiment_score') is not None:
-            scores.append(visual_results.get('sentiment_score', 0))
-            confidences.append(visual_results.get('confidence', 0.8))
-        
-        if audio_results and audio_results.get('sentiment_score') is not None:
-            scores.append(audio_results.get('sentiment_score', 0))
-            confidences.append(audio_results.get('confidence', 0.8))
-        
-        if text_results and text_results.get('sentiment_score') is not None:
-            scores.append(text_results.get('sentiment_score', 0))
-            confidences.append(text_results.get('confidence', 0.8))
-        
-        # Calculate final score (weighted by confidence)
-        if confidences and sum(confidences) > 0:
-            overall_score = sum(s * c for s, c in zip(scores, confidences)) / sum(confidences)
-        elif scores:
-            overall_score = sum(scores) / len(scores)
-        
-        # Determine sentiment classification
-        if overall_score > 0.15:
-            overall_classification = "Positive"
-        elif overall_score < -0.15:
-            overall_classification = "Negative"
-        else:
-            overall_classification = "Neutral"
-            
-        # Store the overall results for later reference
-        self.overall_score = overall_score
-        self.overall_classification = overall_classification
-            
-        # Get sentiment color based on classification
-        color = "#f59e0b"  # Default neutral (amber)
-        if overall_classification.lower() == "positive":
-            color = "#10b981"  # green
-        elif overall_classification.lower() == "negative":
-            color = "#ef4444"  # red
-            
-        # Script to immediately update the UI with MMSA results
-        html_parts.append(f"""
-        <!-- MMSA Final Results (Will be shown in UI) -->
-        <script>
-        (function() {{
-            function updateResults() {{
-                // Find prediction elements
-                var finalPredictionElem = document.getElementById('final-prediction');
-                var sentimentLabelElem = document.getElementById('sentiment-label');
-                var scoreDisplayElem = document.getElementById('score-display-value');
-                
-                // Update final prediction
-                if (finalPredictionElem) {{
-                    finalPredictionElem.textContent = "{overall_classification}";
-                    finalPredictionElem.style.color = "{color}";
-                    finalPredictionElem.style.fontWeight = "bold";
-                }}
-                
-                // Update sentiment label
-                if (sentimentLabelElem) {{
-                    sentimentLabelElem.textContent = "{overall_classification}";
-                    sentimentLabelElem.style.color = "{color}";
-                    sentimentLabelElem.style.fontWeight = "bold";
-                }}
-                
-                // Update score display
-                if (scoreDisplayElem) {{
-                    scoreDisplayElem.textContent = "{overall_score:.2f}";
-                    scoreDisplayElem.style.color = "{color}";
-                    scoreDisplayElem.style.fontWeight = "bold";
-                }}
-                
-                // Direct replacement of waiting text
-                var elements = document.querySelectorAll('*');
-                elements.forEach(function(el) {{
-                    if (el.childNodes.length === 1 && 
-                        el.childNodes[0].nodeType === 3 && 
-                        (el.textContent.trim() === 'Waiting for analysis...' || 
-                        el.textContent.trim() === 'Calculating...')) {{
-                        
-                        if (el.id && el.id.includes('score')) {{
-                            el.textContent = "{overall_score:.2f}";
-                        }} else {{
-                            el.textContent = "{overall_classification}";
-                        }}
-                        
-                        el.style.color = "{color}";
-                        el.style.fontWeight = "bold";
-                    }}
-                }});
-            }}
-            
-            // Run immediately
-            updateResults();
-            
-            // And several times with delay to ensure it happens after DOM updates
-            setTimeout(updateResults, 100);
-            setTimeout(updateResults, 500);
-            setTimeout(updateResults, 1000);
-            setTimeout(updateResults, 2000);
-        }})();
-        </script>
-        
-        <!-- Additional direct HTML display of results -->
-        <div id="results-data" style="display: none;" 
-            data-classification="{overall_classification}"
-            data-score="{overall_score:.2f}"
-            data-color="{color}">
-        </div>
-        
-        <!-- EXPLICIT RESULT DISPLAY (Hidden but can be referenced) -->
-        <div style="display: none;">
-            <div id="actual-final-prediction">{overall_classification}</div>
-            <div id="actual-sentiment-score">{overall_score:.2f}</div>
-        </div>
-        """)
-            
-        # Add summary of results
-        overall_rows = [
-            ("Overall Sentiment Score", overall_score),
-            ("Classification", overall_classification),
-            ("Modalities Used", len(scores))
-        ]
-        html_parts.append(create_result_table("Overall Sentiment Analysis", overall_rows))
-        
-        # Visual Results
-        if visual_results:
-            visual_rows = [
-                ("Sentiment Score", visual_results.get('sentiment_score', 'N/A')),
-                ("Dominant Expression", visual_results.get('dominant_emotion', 'Unknown')),
-                ("Confidence", visual_results.get('confidence', 'N/A'))
-            ]
-            html_parts.append(create_result_table("Visual Analysis", visual_rows))
-            
-        # Audio Results
-        if audio_results:
-            audio_rows = [
-                ("Sentiment Score", audio_results.get('sentiment_score', 'N/A')),
-                ("Dominant Emotion", audio_results.get('emotion', 'Unknown')),
-                ("Confidence", audio_results.get('confidence', 'N/A'))
-            ]
-            html_parts.append(create_result_table("Audio Analysis", audio_rows))
-            
-        # Text Results
-        if text_results:
-            text_rows = [
-                ("Sentiment Score", text_results.get('sentiment_score', 'N/A')),
-                ("Classification", text_results.get('classification', 'Unknown')),
-                ("Confidence", text_results.get('confidence', 'N/A'))
-            ]
-            html_parts.append(create_result_table("Text Analysis", text_rows))
-            
-        # Add transcript if available
-        if transcript:
-            html_parts.append(f"""
-            <div style="margin-bottom: 30px;">
-                <h2>Speech Transcript</h2>
-                <div style="height: 3px; width: 50px; background: linear-gradient(90deg, #0066ff, #7c3aed); margin-bottom: 15px;"></div>
-                <div style="background-color: #f5f7fa; padding: 15px; border-radius: 8px; font-size: 16px; line-height: 1.6;">
-                    "{transcript}"
-                </div>
-            </div>
-            """)
-            
-        # Combine all parts
-        return ''.join(html_parts)
-
 def create_interface(mmsa_with_shap, share=False, port=7860):
     """Create the Gradio interface with premium design and SHAP visualizations"""
     
@@ -2353,32 +1840,38 @@ def create_interface(mmsa_with_shap, share=False, port=7860):
                         # Detailed analysis results
                         result_html = gr.HTML(label="Detailed Analysis")
                     
-                    # SHAP Visualizations tab
-                    with gr.TabItem("SHAP Explanations"):
-                        gr.Markdown("### Explainable AI with SHAP")
-                        
+                    # Feature-contribution charts tab
+                    with gr.TabItem("Feature Contributions"):
+                        gr.Markdown("### How each modality shaped the prediction")
+
                         with gr.Row():
                             modality_dropdown = gr.Dropdown(
                                 choices=["visual", "audio", "text", "all"],
                                 value="all",
-                                label="Choose modality for SHAP visualization"
+                                label="Choose modality to inspect"
                             )
-                            view_button = gr.Button("View Explanation", variant="secondary")
-                        
+                            view_button = gr.Button("View Contributions", variant="secondary")
+
                         gallery = gr.Gallery(
-                            label="SHAP Visualizations",
+                            label="Feature Contribution Charts",
                             show_label=True,
                             elem_id="shap-gallery",
                             columns=2,
                             height="auto",
                             object_fit="contain"
                         )
-                        
+
                         gr.Markdown(
                             """
-                            **SHAP (SHapley Additive exPlanations)** visualizations show how each feature 
-                            contributes to the final sentiment prediction. Red indicates features that 
-                            push the prediction higher, while blue shows features that push it lower.
+                            These **feature-contribution charts** show how each detected
+                            emotion/label contributes to the sentiment score for a modality
+                            (probability × the label's sentiment weight). Bars to the right
+                            push the score positive; bars to the left push it negative.
+
+                            *Note: these are weighted contribution charts, not SHAP
+                            (Shapley) values — the model output is decomposed by its own
+                            feature weights, not by a coalitional game. True SHAP
+                            explainers are a planned enhancement (see the project README).*
                             """
                         )
         

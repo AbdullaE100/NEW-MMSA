@@ -1,0 +1,4 @@
+# Development-only tooling. Kept separate from runtime deps so the fast unit
+# tests and linters can run without installing the heavy ML stack.
+pytest>=7.0
+ruff>=0.1

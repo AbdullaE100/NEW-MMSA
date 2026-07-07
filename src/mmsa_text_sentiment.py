@@ -166,44 +166,37 @@ class TextSentimentAnalyzer:
         
         return hint
 
-    def _enrich_context(self, text, expected_sentiment=None):
+    def _enrich_context(self, text):
         """
-        Enrich context for short, neutral-sounding transcripts
-        
+        Enrich context for short, neutral-sounding transcripts.
+
+        For very short transcripts the model has little to work with, so we
+        generate both a positive- and a negative-leaning paraphrase of any
+        template key found in the text and let ``analyze`` pick the highest
+        confidence prediction across all variants. Both directions are always
+        offered, so this does not bias the result toward any known label.
+
         Args:
             text (str): Original transcript text
-            expected_sentiment (float, optional): Expected sentiment if known
-            
+
         Returns:
             list: List of context-enriched versions of the text
         """
         text_lower = text.lower()
         enriched_texts = [text]  # Always include original text
-        
+
         # If the text is very short, it may not have enough information for sentiment analysis
         if len(text.split()) < 8:
-            logger.info(f"Short transcript detected, adding context enrichment")
-            
+            logger.info("Short transcript detected, adding context enrichment")
+
             # Extract key terms that might benefit from enrichment
             for key, templates in self.context_templates.items():
                 if key in text_lower:
-                    # If we know the expected sentiment, bias toward it
-                    if expected_sentiment is not None:
-                        if expected_sentiment > 0.1:
-                            enriched = text_lower.replace(key, templates["positive"])
-                            enriched_texts.append(enriched)
-                            logger.info(f"Added positive context enrichment: {enriched}")
-                        elif expected_sentiment < -0.1:
-                            enriched = text_lower.replace(key, templates["negative"])
-                            enriched_texts.append(enriched)
-                            logger.info(f"Added negative context enrichment: {enriched}")
-                    else:
-                        # If no expected sentiment, add both positive and negative variants
-                        positive_enriched = text_lower.replace(key, templates["positive"])
-                        negative_enriched = text_lower.replace(key, templates["negative"])
-                        enriched_texts.extend([positive_enriched, negative_enriched])
-                        logger.info(f"Added both positive and negative context enrichments")
-        
+                    positive_enriched = text_lower.replace(key, templates["positive"])
+                    negative_enriched = text_lower.replace(key, templates["negative"])
+                    enriched_texts.extend([positive_enriched, negative_enriched])
+                    logger.info("Added both positive and negative context enrichments")
+
         return enriched_texts
 
     def predict_sentiment(self, text):
@@ -214,10 +207,11 @@ class TextSentimentAnalyzer:
             text (str): Input text
             
         Returns:
-            tuple: (sentiment label, confidence, sentiment score)
+            tuple: (sentiment label, confidence, sentiment score, full score
+                distribution keyed by label)
         """
         if not text or text.strip() == "":
-            return "neutral", 1.0, 0.0
+            return "neutral", 1.0, 0.0, {}
         
         # Clean and preprocess text
         processed_text = self._preprocess_text(text)
@@ -243,19 +237,21 @@ class TextSentimentAnalyzer:
         # Adjust score by confidence - more pronounced to avoid neutral bias
         adjusted_score = sentiment_score * (confidence ** 0.8)  # Using a power less than 1 to enhance low confidence signals
         
+        # Full probability distribution over labels, for transparency/reporting
+        score_distribution = {self.id2label[i]: float(scores[i]) for i in range(len(scores))}
+
         # Log the prediction details
         logger.info(f"Text sentiment prediction: '{processed_text}' -> {label} (conf: {confidence:.2f}, score: {adjusted_score:.2f})")
         logger.info(f"Raw scores: {[(self.id2label[i], float(scores[i])) for i in ranking[:3]]}")
-        
-        return label, confidence, adjusted_score
 
-    def analyze(self, text, expected_sentiment=None, enhance_short_texts=True):
+        return label, confidence, adjusted_score, score_distribution
+
+    def analyze(self, text, enhance_short_texts=True):
         """
         Analyze sentiment from text with context enrichment for difficult cases
-        
+
         Args:
-            text (str): Input text 
-            expected_sentiment (float, optional): Expected sentiment if known
+            text (str): Input text
             enhance_short_texts (bool): Whether to apply context enrichment
             
         Returns:
@@ -271,18 +267,19 @@ class TextSentimentAnalyzer:
             # 2. Generate context-enriched versions for short texts if enabled
             texts_to_analyze = [text]
             if enhance_short_texts:
-                texts_to_analyze = self._enrich_context(text, expected_sentiment)
+                texts_to_analyze = self._enrich_context(text)
             
             # 3. Analyze all text variants
             results = []
             
             for variant in texts_to_analyze:
-                label, confidence, score = self.predict_sentiment(variant)
+                label, confidence, score, distribution = self.predict_sentiment(variant)
                 results.append({
                     "label": label,
                     "confidence": confidence,
                     "score": score,
-                    "text": variant
+                    "text": variant,
+                    "distribution": distribution
                 })
             
             # 4. Choose the best result based on confidence and hint bias
@@ -329,24 +326,6 @@ class TextSentimentAnalyzer:
                 final_score = (final_score * (1.0 - hint_weight)) + (hint_score * hint_weight)
                 logger.info(f"Adjusted neutral result using emotion hints: {final_label}, score: {final_score}")
             
-            # Add expected_sentiment as a hint if provided
-            if expected_sentiment is not None:
-                # Only apply if expected_sentiment is non-neutral and our current score is weak
-                if abs(expected_sentiment) > 0.2 and abs(final_score) < 0.3:
-                    # Blend with expected sentiment (weak influence of 30%)
-                    blend_weight = 0.3
-                    blended_score = (final_score * (1.0 - blend_weight)) + (expected_sentiment * blend_weight)
-                    logger.info(f"Adjusted score using expected sentiment: {final_score:.2f} -> {blended_score:.2f}")
-                    final_score = blended_score
-                    
-                    # Update label if score changed significantly
-                    if final_score > 0.2 and final_label.lower() != "positive":
-                        final_label = "positive"
-                        logger.info(f"Updated label based on expected sentiment: {final_label}")
-                    elif final_score < -0.2 and final_label.lower() != "negative":
-                        final_label = "negative"
-                        logger.info(f"Updated label based on expected sentiment: {final_label}")
-            
             # Log final results
             logger.info(f"Text sentiment: {final_label} (Confidence: {final_confidence:.2f}, Score: {final_score:.2f})")
             
@@ -357,9 +336,7 @@ class TextSentimentAnalyzer:
                 "sentiment_score": float(final_score),
                 "text": text,
                 "emotion_hints": emotion_hints,
-                "all_scores": {
-                    self.id2label[i]: float(scores[i]) for i in range(len(scores))
-                } if 'scores' in locals() else {},
+                "all_scores": best_result.get("distribution", {}),
                 "enhanced": len(texts_to_analyze) > 1
             }
             
@@ -369,44 +346,25 @@ class TextSentimentAnalyzer:
 
     def predict_from_video_transcription(self, transcript, video_filename=None):
         """
-        Analyze sentiment from video transcription with filename-based hints
-        
+        Analyze sentiment from a video's speech transcript.
+
+        The prediction is derived solely from the transcript text. The
+        ``video_filename`` argument is accepted for backward compatibility and
+        is deliberately ignored: an earlier version of this method parsed
+        emotion keywords out of the filename (e.g. RAVDESS filenames encode the
+        ground-truth label) and used them to override the model output. That is
+        label leakage — it inflates apparent accuracy by reading the answer key
+        — so it has been removed.
+
         Args:
-            transcript (str): Transcribed text from video
-            video_filename (str, optional): Original video filename for hints
-            
+            transcript (str): Transcribed text from the video.
+            video_filename (str, optional): Ignored. Retained only so existing
+                callers do not break.
+
         Returns:
-            dict: Dictionary with sentiment analysis results
+            dict: Sentiment analysis results for ``transcript``.
         """
-        expected_sentiment = None
-        
-        # Extract hints from filename if available
-        if video_filename:
-            filename_lower = video_filename.lower()
-            
-            # Look for emotion keywords in the filename
-            if any(k in filename_lower for k in ["happy", "joy", "laugh", "lol", "smile"]):
-                expected_sentiment = 0.7  # Strongly positive
-            elif any(k in filename_lower for k in ["angry", "anger", "mad"]):
-                expected_sentiment = -0.8  # Very negative
-            elif any(k in filename_lower for k in ["sad", "unhappy", "cry"]):
-                expected_sentiment = -0.7  # Negative
-            elif any(k in filename_lower for k in ["disgust", "eww"]):
-                expected_sentiment = -0.6  # Negative
-            elif any(k in filename_lower for k in ["surprise", "suprised", "wow"]):
-                expected_sentiment = 0.6  # Positive
-            elif any(k in filename_lower for k in ["calm", "peace", "relax"]):
-                expected_sentiment = 0.2  # Slightly positive
-            elif any(k in filename_lower for k in ["fear", "scared", "afraid"]):
-                expected_sentiment = -0.6  # Negative
-            elif any(k in filename_lower for k in ["neutral"]):
-                expected_sentiment = 0.0  # Neutral
-                
-            if expected_sentiment is not None:
-                logger.info(f"Extracted sentiment hint from filename: {expected_sentiment}")
-        
-        # Analyze with potential filename hints
-        return self.analyze(transcript, expected_sentiment=expected_sentiment)
+        return self.analyze(transcript)
 
 
 if __name__ == "__main__":

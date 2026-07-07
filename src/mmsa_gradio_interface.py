@@ -31,6 +31,7 @@ logger = logging.getLogger('mmsa_gradio')
 # Import our custom modules
 from mmsa_audio_sentiment import AudioSentimentAnalyzer
 from deepface_emotion_detector import DeepFaceEmotionDetector
+from config import FUSION_WEIGHTS
 
 # Check if transformers is available for text analysis
 try:
@@ -489,23 +490,20 @@ class MultimodalSentimentGradio:
             
             if visual_results:
                 visual_score = visual_results.get("sentiment_score", 0)
-                visual_weight = 0.45  # Updated weight for visual
                 modality_scores.append(visual_score)
-                modality_weights.append(visual_weight)
+                modality_weights.append(FUSION_WEIGHTS["visual"])
                 modality_names.append("visual")
-            
+
             if audio_results:
                 audio_score = audio_results.get("sentiment_score", 0)
-                audio_weight = 0.45  # Updated weight for audio
                 modality_scores.append(audio_score)
-                modality_weights.append(audio_weight)
+                modality_weights.append(FUSION_WEIGHTS["audio"])
                 modality_names.append("audio")
-            
+
             if text_results:
                 text_score = text_results.get("sentiment_score", 0)
-                text_weight = 0.10  # Updated weight for text
                 modality_scores.append(text_score)
-                modality_weights.append(text_weight)
+                modality_weights.append(FUSION_WEIGHTS["text"])
                 modality_names.append("text")
             
             # Calculate weighted sentiment if we have scores

@@ -29,6 +29,8 @@ import time
 from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 
+from audio_features import fixed_length_signal
+
 # Setup logging if not already set up
 logger = logging.getLogger('mmsa_audio')
 if not logger.handlers:
@@ -244,20 +246,14 @@ class AudioSentimentAnalyzer:
             data, _ = librosa.load(file_path, sr=self.sampling_rate, 
                                    duration=self.audio_duration, offset=0.5)
             
-            input_length = self.sampling_rate * self.audio_duration
-            
-            # Handle audio length differences with padding or cropping
-            if len(data) > input_length:
-                max_offset = len(data) - input_length
-                offset = np.random.randint(max_offset)
-                data = data[offset:(input_length+offset)]
-            else:
-                if input_length > len(data):
-                    max_offset = input_length - len(data)
-                    offset = np.random.randint(max_offset)
-                else:
-                    offset = 0
-                data = np.pad(data, (offset, int(input_length) - len(data) - offset), "constant")
+            input_length = int(self.sampling_rate * self.audio_duration)
+
+            # Normalise the clip to a fixed length with a DETERMINISTIC centered
+            # crop / pad. A previous version used np.random.randint here, which
+            # meant the same audio produced different features (and therefore a
+            # different prediction) on every call. Random cropping is a training
+            # augmentation; it has no place in an inference feature extractor.
+            data = fixed_length_signal(data, input_length)
             
             # Extract MFCC features (2D representation)
             mfcc = librosa.feature.mfcc(y=data, sr=self.sampling_rate, n_mfcc=self.n_mfcc)
@@ -750,24 +746,11 @@ class AudioSentimentAnalyzer:
         except Exception as e:
             logger.error(f"Error predicting from video {video_path}: {str(e)}")
             return None
-            
-        """
-        Alias for predict_from_video to maintain compatibility with the Gradio interface
-        
-        Args:
-            video_path (str): Path to video file
-            
-        Returns:
-            dict: Predicted emotion, confidence, and sentiment score
-        """
+
+    def analyze_video(self, video_path):
+        """Alias for :meth:`predict_from_video`, used by the Gradio interface."""
         return self.predict_from_video(video_path)
 
-        """Alias for predict_from_video to maintain compatibility with the Gradio interface"""
-        return self.predict_from_video(video_path)
-
-def analyze_video(self, video_path):
-        """Alias for predict_from_video to maintain compatibility with the Gradio interface"""
-        return self.predict_from_video(video_path)
 
 def main():
     """Run a simple test of the audio sentiment analyzer"""
